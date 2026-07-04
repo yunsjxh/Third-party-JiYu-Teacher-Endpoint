@@ -1,5 +1,9 @@
 # 第三方极域教师端 / Third-party JiYu Teacher Endpoint
 
+[![GitHub stars](https://img.shields.io/github/stars/yunsjxh/Third-party-JiYu-Teacher-Endpoint?style=social)](https://github.com/yunsjxh/Third-party-JiYu-Teacher-Endpoint/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/yunsjxh/Third-party-JiYu-Teacher-Endpoint?style=social)](https://github.com/yunsjxh/Third-party-JiYu-Teacher-Endpoint/network/members)
+[![GitHub release](https://img.shields.io/github/v/release/yunsjxh/Third-party-JiYu-Teacher-Endpoint)](https://github.com/yunsjxh/Third-party-JiYu-Teacher-Endpoint/releases)
+
 一个用 Python 实现的**第三方极域课堂管理系统 V6.0 教师端模拟器**。本项目基于对官方教师端可执行文件的 **IDA Pro 静态逆向分析**以及真实网络抓包，还原出教师端与学生端之间的 UDP 通信协议，从而让学生端将本机识别为合法教师机，并接收登录、保活、控制请求以及屏幕缩略图等数据。
 
 > 本项目仅用于协议学习、网络安全研究与教学演示。**请在合法授权范围内使用，严禁用于未经许可的监控、入侵或干扰他人设备。**
@@ -91,7 +95,9 @@ python "teacher_sim.py"
 ```
 .
 ├── teacher_sim.py   # 主程序
-└── README.md        # 本文件
+├── README.md        # 项目说明
+├── .gitignore       # Git 忽略规则
+└── LICENSE          # MIT 许可证
 ```
 
 ---
@@ -107,7 +113,7 @@ python "teacher_sim.py"
 
 ## 许可证
 
-MIT License —— 详见 LICENSE 文件（如需使用，请自行添加）。
+MIT License —— 详见 [LICENSE](./LICENSE) 文件。
 
 ---
 
