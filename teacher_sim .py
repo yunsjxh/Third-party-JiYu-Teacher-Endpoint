@@ -273,6 +273,68 @@ def handle_tnal(d, sip):
         del previews[sip]
 
 
+def handle_mess(d, sip, sp, via='unknown'):
+    """解析学生端发来的 MESS 消息包（聊天/提示类）。"""
+    if len(d) < 12:
+        logger.warning('[MESS] 包过短（%d 字节）from %s:%d via %s', len(d), sip, sp, via)
+        return
+
+    try:
+        magic, sender_id, rcpt_count = struct.unpack('<III', d[:12])
+        header_len = 12 + 4 * rcpt_count
+        if len(d) < header_len:
+            logger.warning('[MESS] 头长度不足 from %s:%d (rcpt_count=%d)', sip, sp, rcpt_count)
+            return
+        payload = d[header_len:]
+    except struct.error as e:
+        logger.error('[MESS] 解包失败 from %s:%d：%s', sip, sp, e)
+        return
+
+    logger.info('[MESS] RECV from %s:%d via %s, sender_id=0x%08X, rcpt_count=%d, payload_len=%d',
+                sip, sp, via, sender_id, rcpt_count, len(payload))
+    logger.debug('[MESS] payload hex\n%s', hexdump(payload[:256]))
+
+    text = None
+    msg_kind = 'unknown'
+    msg_type = struct.unpack('<I', payload[4:8])[0] if len(payload) >= 8 else 0
+
+    # IDA 中聊天消息负载结构：
+    # [0..3]=总长, [4..7]=0x800, [8..11]=0, [12..15]=1, [16..]=UTF-16-LE 字符串
+    if len(payload) >= 16 and msg_type == 0x800:
+        try:
+            raw = payload[16:].rstrip(b'\x00')
+            if len(raw) % 2:
+                raw = raw[:-1]
+            text = raw.decode('utf-16-le')
+            msg_kind = 'chat'
+        except Exception as e:
+            logger.debug('[MESS] 聊天消息 UTF-16-LE 解码失败：%s', e)
+
+    # 另一类常见 MESS：学生端状态/窗口标题
+    # [0..3]=总长, [4..7]=0, [8..11]=3, [12..15]=子类型, [16..19]=字符串最大长度,
+    # [20..23]=0, [24..]=UTF-16-LE 字符串
+    elif len(payload) >= 24 and msg_type == 0:
+        try:
+            raw = payload[24:].rstrip(b'\x00')
+            if len(raw) % 2:
+                raw = raw[:-1]
+            text = raw.decode('utf-16-le')
+            msg_kind = 'status'
+        except Exception as e:
+            logger.debug('[MESS] 状态消息 UTF-16-LE 解码失败：%s', e)
+
+    if text:
+        if msg_kind == 'chat':
+            logger.info('[MESS] 来自 %s:%d 的聊天消息：%s', sip, sp, text)
+            print(f'[学生消息] {sip}: {text}')
+        else:
+            logger.info('[MESS] 来自 %s:%d 的状态消息：%s', sip, sp, text)
+            print(f'[学生状态] {sip}: {text}')
+    else:
+        logger.info('[MESS] 来自 %s:%d 的消息无法解析文本，payload_len=%d, msg_type=0x%08X',
+                    sip, sp, len(payload), msg_type)
+
+
 def broadcast():
     logger.info('[Broadcast] 启动')
     while running:
@@ -364,6 +426,9 @@ def session_recv():
 
                 threading.Thread(target=keep_alive_preview, args=(sip,), daemon=True).start()
 
+            elif mag == 0x5353454D:  # MESS 学生端发来的消息
+                handle_mess(d, sip, sp, 'SessionRecv')
+
             elif mag not in ROUTINE_MAGICS:
                 # 非日常广播包才记录，减少噪音
                 logger.warning(
@@ -432,6 +497,9 @@ def main_recv():
 
             elif mag == 0x544E414C:  # LANT
                 handle_tnal(d, sip)
+
+            elif mag == 0x5353454D:  # MESS 学生端发来的消息
+                handle_mess(d, sip, sp, 'MainRecv')
 
             else:
                 logger.warning('[MainRecv] 未知包 %s from %s:%d, len=%d\n%s',
