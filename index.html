@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Third-party JiYu Teacher Endpoint</title>
+    <meta
+      name="description"
+      content="第三方极域教师端模拟器项目官网：协议研究、UDP 通信还原、缩略图接收与消息解析。"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="#top" aria-label="Third-party JiYu Teacher Endpoint">
+        <span class="brand-mark">JY</span>
+        <span>Teacher Endpoint</span>
+      </a>
+      <nav class="nav" aria-label="页面导航">
+        <a href="#features">能力</a>
+        <a href="#protocol">协议</a>
+        <a href="#run">运行</a>
+        <a href="#safety">边界</a>
+      </nav>
+    </header>
+
+    <main id="top">
+      <section class="hero">
+        <canvas id="packetCanvas" aria-hidden="true"></canvas>
+        <div class="hero-grid">
+          <div class="hero-copy">
+            <p class="eyebrow">JiYu V6.0 / UDP Protocol Lab</p>
+            <h1>第三方极域教师端模拟器</h1>
+            <p class="lede">
+              基于静态逆向与真实抓包复现教师端通信流程，让协议字段、握手时序、缩略图分片与学生端状态上报都变成可观察、可研究、可验证的工程样本。
+            </p>
+            <div class="hero-actions" aria-label="主要操作">
+              <a class="button primary" href="#run">开始运行</a>
+              <a class="button ghost" href="#protocol">查看协议</a>
+            </div>
+          </div>
+
+          <aside class="console-panel" aria-label="模拟控制台">
+            <div class="console-head">
+              <span class="dot red"></span>
+              <span class="dot amber"></span>
+              <span class="dot green"></span>
+              <span class="console-title">teacher_sim.log</span>
+            </div>
+            <div class="console-lines" id="consoleLines">
+              <p><span>08:33:13</span> Teacher 192.168.2.203 started</p>
+              <p><span>08:33:17</span> [Login] 192.168.2.139 登录成功</p>
+              <p><span>08:33:21</span> [KACA] keep-alive -> WACA</p>
+              <p><span>08:33:33</span> [MESS] [窗口标题] Program Manager</p>
+              <p><span>08:33:48</span> [Preview] preview_192_168_2_139_0_fixed.jpg</p>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <section class="stats-band" aria-label="项目摘要">
+        <div>
+          <strong>2</strong>
+          <span>多播通道</span>
+        </div>
+        <div>
+          <strong>15+</strong>
+          <span>已识别包类型</span>
+        </div>
+        <div>
+          <strong>V6.0</strong>
+          <span>协议目标版本</span>
+        </div>
+        <div>
+          <strong>Python</strong>
+          <span>单文件实现</span>
+        </div>
+      </section>
+
+      <section class="section split" id="features">
+        <div class="section-intro">
+          <p class="eyebrow">Core Capabilities</p>
+          <h2>把黑盒通信拆成清晰的工程链路</h2>
+          <p>
+            项目聚焦协议学习与教学演示，覆盖发现、登录、保活、消息、缩略图重组与图像修正等关键路径。
+          </p>
+        </div>
+        <div class="feature-grid">
+          <article class="feature-card">
+            <span class="icon">01</span>
+            <h3>在线宣告</h3>
+            <p>周期性发送 OONC、CANC、ANNO，让学生端在同一广播域内发现模拟教师机。</p>
+          </article>
+          <article class="feature-card">
+            <span class="icon">02</span>
+            <h3>登录握手</h3>
+            <p>处理 LOGI 并回送 MESS、LPNT、DMOC，复现教师端建立连接的关键时序。</p>
+          </article>
+          <article class="feature-card">
+            <span class="icon">03</span>
+            <h3>缩略图重组</h3>
+            <p>接收 LANT/TNAL 分片，拼接 JPEG，并修复 bottom-up DIB 与色度反相问题。</p>
+          </article>
+          <article class="feature-card">
+            <span class="icon">04</span>
+            <h3>消息解析</h3>
+            <p>解析学生端聊天、窗口标题、WiFi 数量、浏览器 URL 与系统性能状态。</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section flow-section" id="protocol">
+        <div class="section-intro narrow">
+          <p class="eyebrow">Protocol Map</p>
+          <h2>从广播发现到数据回流</h2>
+        </div>
+        <div class="flow">
+          <div class="node teacher">Teacher</div>
+          <div class="lane">
+            <span>OONC / CANC / ANNO</span>
+            <i></i>
+            <span>LOGI / KACA / MESS</span>
+            <i></i>
+            <span>LANT / TNAL Preview</span>
+          </div>
+          <div class="node student">Student</div>
+        </div>
+        <div class="protocol-table" role="table" aria-label="协议包速览">
+          <div role="row">
+            <span role="cell">224.50.50.42:4705</span>
+            <span role="cell">控制、缩略图、保活</span>
+          </div>
+          <div role="row">
+            <span role="cell">225.2.2.1:5512</span>
+            <span role="cell">登录、状态广播、聊天消息</span>
+          </div>
+          <div role="row">
+            <span role="cell">MESS subtype 0x800</span>
+            <span role="cell">学生端聊天消息</span>
+          </div>
+          <div role="row">
+            <span role="cell">MESS subtype 6 / 7</span>
+            <span role="cell">窗口标题与 WiFi 数量</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="section run-section" id="run">
+        <div class="section-intro">
+          <p class="eyebrow">Launch</p>
+          <h2>本地运行</h2>
+          <p>准备 Python 3.8+、Pillow、Windows 网络环境，并确保测试设备处于合法授权的同一二层网络。</p>
+        </div>
+        <div class="run-grid">
+          <div class="code-window" aria-label="运行命令">
+            <div class="console-head">
+              <span class="dot red"></span>
+              <span class="dot amber"></span>
+              <span class="dot green"></span>
+              <span class="console-title">PowerShell</span>
+            </div>
+            <pre><code>pip install Pillow
+python "teacher_sim .py"</code></pre>
+          </div>
+          <div class="command-list">
+            <h3>交互命令</h3>
+            <p><code>list</code> 列出已登录学生</p>
+            <p><code>preview &lt;ip&gt;</code> 请求屏幕缩略图</p>
+            <p><code>all</code> 请求所有学生缩略图</p>
+            <p><code>msg &lt;ip&gt; &lt;text&gt;</code> 发送聊天消息</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section safety" id="safety">
+        <div>
+          <p class="eyebrow">Research Boundary</p>
+          <h2>仅限授权研究与教学演示</h2>
+        </div>
+        <p>
+          本项目是独立第三方实现，与官方软件无关联。请只在自己拥有管理权限、或已获得明确授权的网络与设备上使用；不得用于未经许可的监控、入侵、干扰或控制他人设备。
+        </p>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span>MIT License</span>
+      <span>Protocol notes for security research</span>
+    </footer>
+
+    <script src="script.js"></script>
+  </body>
+</html>
