@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
-"""极域V6.0教师端 - 逐字节匹配真实抓包，带调试日志。"""
-import socket,struct,threading,time,random,sys,os,uuid,colorsys
+"""极域V6.0教师端 - 逐字节匹配真实抓包，带调试日志。
+
+运行后会弹出两个窗口：
+- 主窗口：显示命令提示符 teacher>，用于输入操作命令。
+- 日志窗口：PowerShell 实时 tail teacher_sim.log。
+"""
+import socket, struct, threading, time, random, sys, os, uuid, colorsys
 import logging, logging.handlers
 from PIL import Image, ImageOps
 import io
+import subprocess
 
 LOG_DIR = os.path.join(os.path.expanduser('~'), 'Desktop')
 LOG_PATH = os.path.join(LOG_DIR, 'teacher_sim.log')
+
 
 def setup_logging():
     logger = logging.getLogger()
@@ -25,13 +32,41 @@ def setup_logging():
     fh.setFormatter(fmt)
     logger.addHandler(fh)
 
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.INFO)
-    ch.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
-    logger.addHandler(ch)
+    # 日志由独立窗口实时显示，主窗口只保留命令交互，所以不再输出到 stdout。
+    # 如需在控制台也看日志，可取消下面注释。
+    # ch = logging.StreamHandler(sys.stdout)
+    # ch.setLevel(logging.INFO)
+    # ch.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+    # logger.addHandler(ch)
 
     logger.info('日志系统初始化完成，log 文件：%s', LOG_PATH)
     return logger
+
+
+def spawn_log_window():
+    """在独立的命令行窗口中实时跟踪日志文件。"""
+    # 确保日志文件已存在，避免 PowerShell Get-Content 报错。
+    if not os.path.exists(LOG_PATH):
+        open(LOG_PATH, 'a', encoding='utf-8').close()
+
+    # 强制 PowerShell 控制台使用 UTF-8，避免中文日志乱码。
+    ps_cmd = (
+        f'chcp 65001 | Out-Null; '
+        f'[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; '
+        f'Get-Content -Path "{LOG_PATH}" -Wait -Tail 50 -Encoding UTF8'
+    )
+    try:
+        subprocess.Popen(
+            ['start', 'powershell', '-NoExit', '-Command', ps_cmd],
+            shell=True,
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        print('[启动] 已打开实时日志窗口（PowerShell 跟踪 log，UTF-8）')
+    except Exception as e:
+        print(f'[启动] 打开日志窗口失败：{e}')
+
 
 logger = setup_logging()
 
@@ -61,9 +96,9 @@ MAGIC_NAMES = {
 # 日常广播类魔数，不必逐条记录 hexdump
 ROUTINE_MAGICS = {0x434E4F4F, 0x434E4143, 0x4F4E4E41}
 
-students={}
-previews={}   # sip -> {'total':int, 'buf':bytearray, 'got':int}
-running=True
+students = {}
+previews = {}   # sip -> {'total':int, 'buf':bytearray, 'got':int}
+running = True
 
 
 def hexdump(data, width=16):
@@ -127,8 +162,8 @@ logger.info('Teacher %s started on %s:%d + %s:%d', ip, MCAST, PORT, SMCAST, SPOR
 
 def oonc():
     global oonc_seq
-    pkt = (struct.pack('<II',0x434E4F4F,0x10000)
-           + struct.pack('<I',16)
+    pkt = (struct.pack('<II', 0x434E4F4F, 0x10000)
+           + struct.pack('<I', 16)
            + TGUID.bytes_le
            + socket.inet_aton(ip)
            + struct.pack('<III', 1, 1, oonc_seq))
@@ -137,23 +172,25 @@ def oonc():
 
 
 def canc():
-    n='1\x00'; nw=n.encode('utf-16-le'); nc=len(nw)//2
-    af=(nc<<16)|1
-    p=struct.pack('<II',0x434E4143,0x10000)+struct.pack('<I',84)+TGUID.bytes_le
-    p+=struct.pack('<I',af)+socket.inet_aton(ip)+b'\x01\x00\x00\x00\x01\x00\x00\x00'+nw
-    p+=b'\x00'*(84-len(nw)-8)
+    n = '1\x00'
+    nw = n.encode('utf-16-le')
+    nc = len(nw) // 2
+    af = (nc << 16) | 1
+    p = struct.pack('<II', 0x434E4143, 0x10000) + struct.pack('<I', 84) + TGUID.bytes_le
+    p += struct.pack('<I', af) + socket.inet_aton(ip) + b'\x01\x00\x00\x00\x01\x00\x00\x00' + nw
+    p += b'\x00' * (84 - len(nw) - 8)
     return p
 
 
 def waca(sip):
-    return struct.pack('<II',0x41434157,0x10000)+struct.pack('<I',8)+TGUID.bytes_le+socket.inet_aton(ip)+b'\x01\x00\x00\x00'
+    return struct.pack('<II', 0x41434157, 0x10000) + struct.pack('<I', 8) + TGUID.bytes_le + socket.inet_aton(ip) + b'\x01\x00\x00\x00'
 
 
 def request_preview(sip):
     """主动请求学生端发送预览缩略图 (TNRS)。"""
     tg = bytes.fromhex('aa3a8dbe2b906645908ea29526218540')
-    pkt = struct.pack('<II',0x53524E54,0x10000)+struct.pack('<I',16)+tg
-    pkt += struct.pack('<IIII',0x48,1,0,0x100)
+    pkt = struct.pack('<II', 0x53524E54, 0x10000) + struct.pack('<I', 16) + tg
+    pkt += struct.pack('<IIII', 0x48, 1, 0, 0x100)
     logger.info('[Preview] TNRS -> %s, len=%d', sip, len(pkt))
     try:
         sock.sendto(pkt, (sip, PORT))
@@ -161,19 +198,43 @@ def request_preview(sip):
         logger.error('[Preview] TNRS 发送给 %s 失败：%s', sip, e, exc_info=True)
 
 
+def send_chat(sip, text):
+    """向已登录学生发送聊天消息（MESS，payload type=0x800）。"""
+    if sip not in students:
+        print(f'[命令] 学生 {sip} 未登录')
+        return
+    try:
+        text_utf16 = text.encode('utf-16-le') + b'\x00\x00'
+        payload = (struct.pack('<I', 16 + len(text_utf16))
+                   + struct.pack('<I', 0x800)
+                   + struct.pack('<I', 0)
+                   + struct.pack('<I', 1)
+                   + text_utf16)
+        mess = (struct.pack('<II', 0x5353454D, 1)
+                + struct.pack('<I', 1)
+                + socket.inet_aton(sip)
+                + payload)
+        sock2.sendto(mess, (sip, SPORT))
+        logger.info('[命令] 发送聊天消息 -> %s: %s', sip, text)
+        print(f'[命令] 聊天消息已发送给 {sip}')
+    except Exception as e:
+        logger.error('[命令] 发送聊天消息失败：%s', e, exc_info=True)
+        print(f'[命令] 发送失败：{e}')
+
+
 def build_dmoc():
     """构造 DMOC 包（教师端控制信息）。"""
     cg = bytes.fromhex('ce90fd383df5844c857fa35183c051f3')
-    dd = b'\x20\x4e\x00\x00'+socket.inet_aton(ip)+b'\x35\x00\x00\x00\x35\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x80'
+    dd = b'\x20\x4e\x00\x00' + socket.inet_aton(ip) + b'\x35\x00\x00\x00\x35\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x80'
     dd += bytes.fromhex('e10202331e16e102023421160000a046000020419a99993fa0052000')
     dd += b'\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x3d\x00'
-    return struct.pack('<II',0x434F4D44,0x10000)+struct.pack('<I',len(dd))+cg+dd
+    return struct.pack('<II', 0x434F4D44, 0x10000) + struct.pack('<I', len(dd)) + cg + dd
 
 
 def build_lpnt_subtype3():
     """构造 LPNT subtype=3 包。"""
     lg = bytes.fromhex('aa3a8dbe2b906645908ea29526218540')
-    return struct.pack('<II',0x544E504C,0x10000)+struct.pack('<I',20)+lg+b'\x03\x00\x00\x00\x01\x00\x00\x00\x50\x00\x00\x00\x3c\x00\x00\x00\x05\x00\x00\x00'
+    return struct.pack('<II', 0x544E504C, 0x10000) + struct.pack('<I', 20) + lg + b'\x03\x00\x00\x00\x01\x00\x00\x00\x50\x00\x00\x00\x3c\x00\x00\x00\x05\x00\x00\x00'
 
 
 def keep_alive_preview(sip):
@@ -240,7 +301,7 @@ def handle_tnal(d, sip):
     if state['got'] >= total:
         idx = 0
         while True:
-            fn = os.path.join(LOG_DIR, f'preview_{sip.replace(".","_")}_{idx}.jpg')
+            fn = os.path.join(LOG_DIR, f'preview_{sip.replace(".", "_")}_{idx}.jpg')
             if not os.path.exists(fn):
                 break
             idx += 1
@@ -310,26 +371,45 @@ def handle_mess(d, sip, sp, via='unknown'):
         except Exception as e:
             logger.debug('[MESS] 聊天消息 UTF-16-LE 解码失败：%s', e)
 
-    # 另一类常见 MESS：学生端状态/窗口标题
-    # [0..3]=总长, [4..7]=0, [8..11]=3, [12..15]=子类型, [16..19]=字符串最大长度,
-    # [20..23]=0, [24..]=UTF-16-LE 字符串
+    # 状态/窗口标题等（payload[4:8]==0，payload[8:12]==0x03000000）
+    # IDA 中结构：
+    # [0..3]=总长, [4..7]=0, [8..11]=3, [12..15]=子类型,
+    # [16..19]=字符串最大长度, [20..23]=PID/计数/额外数据, [24..]=UTF-16-LE 字符串
     elif len(payload) >= 24 and msg_type == 0:
-        try:
-            raw = payload[24:].rstrip(b'\x00')
-            if len(raw) % 2:
-                raw = raw[:-1]
-            text = raw.decode('utf-16-le')
+        subtype = struct.unpack('<I', payload[12:16])[0]
+        extra = struct.unpack('<I', payload[20:24])[0]
+        if subtype == 6:
+            try:
+                raw = payload[24:].rstrip(b'\x00')
+                if len(raw) % 2:
+                    raw = raw[:-1]
+                title = raw.decode('utf-16-le')
+                text = f'[窗口标题] {title}'
+                msg_kind = 'status'
+            except Exception as e:
+                logger.debug('[MESS] 窗口标题解码失败：%s', e)
+        elif subtype == 7:
+            # sub_43B080：调用 Wlanapi 获取可用 WiFi 网络数量，-1 表示检测失败
+            count = extra if extra != 0xFFFFFFFF else -1
+            text = f'[WiFi可用网络数量] {count}'
             msg_kind = 'status'
-        except Exception as e:
-            logger.debug('[MESS] 状态消息 UTF-16-LE 解码失败：%s', e)
+        elif subtype == 1:
+            text = f'[IE/浏览器URL信息] extra=0x{extra:08X}'
+            msg_kind = 'status'
+        elif subtype == 0:
+            text = f'[窗口标题清空/PID=0x{extra:08X}]'
+            msg_kind = 'status'
+        elif subtype == 3:
+            text = '[系统性能/进程信息]'
+            msg_kind = 'status'
+        else:
+            logger.debug('[MESS] 未知状态子类型 %d', subtype)
 
     if text:
         if msg_kind == 'chat':
             logger.info('[MESS] 来自 %s:%d 的聊天消息：%s', sip, sp, text)
-            print(f'[学生消息] {sip}: {text}')
         else:
             logger.info('[MESS] 来自 %s:%d 的状态消息：%s', sip, sp, text)
-            print(f'[学生状态] {sip}: {text}')
     else:
         logger.info('[MESS] 来自 %s:%d 的消息无法解析文本，payload_len=%d, msg_type=0x%08X',
                     sip, sp, len(payload), msg_type)
@@ -356,17 +436,17 @@ def session_anno():
     logger.info('[Session] 广播线程启动')
     while running:
         try:
-            pkt1 = struct.pack('<II',0x4F4E4E41,1)
+            pkt1 = struct.pack('<II', 0x4F4E4E41, 1)
             sock2.sendto(pkt1, (SMCAST, SPORT))
             time.sleep(0.3)
 
-            pkt2 = (struct.pack('<III',0x4F4E4E41,1,1)
+            pkt2 = (struct.pack('<III', 0x4F4E4E41, 1, 1)
                     + b'\x00'*8
                     + socket.inet_aton(ip)
-                    + struct.pack('<I',0x0D5AD030)
+                    + struct.pack('<I', 0x0D5AD030)
                     + b'\x00'*4
-                    + struct.pack('<I',0x0D5AD030)
-                    + struct.pack('<I',1)
+                    + struct.pack('<I', 0x0D5AD030)
+                    + struct.pack('<I', 1)
                     + b'\x00'*32)
             sock2.sendto(pkt2, (SMCAST, SPORT))
             time.sleep(0.7)
@@ -397,8 +477,8 @@ def session_recv():
             if mag == 0x49474F4C:  # LOGI
                 logger.info('[SessionRecv] LOGI from %s:%d', sip, sp)
 
-                mess = (struct.pack('<II',0x5353454D,1)
-                        + struct.pack('<I',1)
+                mess = (struct.pack('<II', 0x5353454D, 1)
+                        + struct.pack('<I', 1)
                         + socket.inet_aton(sip)
                         + b'\x1b\x00\x00\x00\x00\x80\x00\x00'
                         + b'\x00'*8
@@ -408,12 +488,12 @@ def session_recv():
                 time.sleep(0.05)
 
                 lg = bytes.fromhex('aa3a8dbe2b906645908ea29526218540')
-                lp = struct.pack('<II',0x544E504C,0x10000)+struct.pack('<I',20)+lg+b'\x02\x00\x00\x00\x00\x00\x00\x00\x50\x00\x00\x00\x3c\x00\x00\x00\x05\x00\x00\x00'
+                lp = struct.pack('<II', 0x544E504C, 0x10000) + struct.pack('<I', 20) + lg + b'\x02\x00\x00\x00\x00\x00\x00\x00\x50\x00\x00\x00\x3c\x00\x00\x00\x05\x00\x00\x00'
                 sock.sendto(lp, (sip, PORT))
                 logger.info('[LPNT] subtype=2 -> %s:%d', sip, PORT)
 
                 lp2 = bytes(lp)
-                lp2 = lp2[:28]+b'\x03\x00\x00\x00\x01\x00\x00\x00'+lp2[36:]
+                lp2 = lp2[:28] + b'\x03\x00\x00\x00\x01\x00\x00\x00' + lp2[36:]
                 sock.sendto(lp2, (sip, PORT))
                 logger.info('[LPNT] subtype=3 -> %s:%d', sip, PORT)
 
@@ -492,7 +572,7 @@ def main_recv():
             elif mag == 0x544E4544:  # DENT
                 logger.info('[MainRecv] DENT %s -> TNRS', sip)
                 tg = bytes.fromhex('aa3a8dbe2b906645908ea29526218540')
-                pkt = struct.pack('<II',0x544E5253,0x10000)+struct.pack('<I',14)+tg+b'\x06\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x09\x00'
+                pkt = struct.pack('<II', 0x544E5253, 0x10000) + struct.pack('<I', 14) + tg + b'\x06\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x09\x00'
                 sock.sendto(pkt, (sip, PORT))
 
             elif mag == 0x544E414C:  # LANT
@@ -511,17 +591,91 @@ def main_recv():
     logger.info('[MainRecv] 退出')
 
 
+# -------------------- 命令行交互 --------------------
+
+def cmd_help():
+    print('''可用命令：
+  help / ?              显示帮助
+  list / ls             列出已登录学生
+  preview <ip>          请求指定学生的屏幕预览
+  all                   请求所有学生的屏幕预览
+  msg <ip> <text>       向指定学生发送聊天消息
+  exit / quit / q       退出程序
+''')
+
+
+def cmd_list():
+    if not students:
+        print('[命令] 当前无学生登录')
+        return
+    print('[命令] 已登录学生：')
+    for i, sip in enumerate(students.keys(), 1):
+        print(f'  {i}. {sip}')
+
+
+def cmd_preview(args):
+    if not args:
+        print('[命令] 用法：preview <学生IP>')
+        return
+    sip = args[0]
+    request_preview(sip)
+    print(f'[命令] 已向 {sip} 请求预览')
+
+
+def cmd_all():
+    if not students:
+        print('[命令] 当前无学生登录')
+        return
+    for sip in list(students.keys()):
+        request_preview(sip)
+        time.sleep(0.05)
+    print(f'[命令] 已向 {len(students)} 个学生请求预览')
+
+
+def command_loop():
+    global running
+    print('教师端已启动，输入 help 查看命令')
+    while running:
+        try:
+            line = input('teacher> ').strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not line:
+            continue
+        parts = line.split(maxsplit=2)
+        cmd = parts[0].lower()
+        args = parts[1:]
+
+        if cmd in ('help', '?', 'h'):
+            cmd_help()
+        elif cmd in ('list', 'ls', 'students'):
+            cmd_list()
+        elif cmd == 'preview':
+            cmd_preview(args)
+        elif cmd == 'all':
+            cmd_all()
+        elif cmd == 'msg':
+            if len(args) < 2:
+                print('[命令] 用法：msg <学生IP> <消息内容>')
+            else:
+                send_chat(args[0], args[1])
+        elif cmd in ('exit', 'quit', 'q'):
+            break
+        else:
+            print(f'[命令] 未知命令：{cmd}，输入 help 查看帮助')
+
+
+# -------------------- 启动 --------------------
+
+spawn_log_window()
 logger.info('启动 4 个后台线程')
 threading.Thread(target=broadcast, name='broadcast', daemon=True).start()
 threading.Thread(target=session_anno, name='session_anno', daemon=True).start()
 threading.Thread(target=session_recv, name='session_recv', daemon=True).start()
 threading.Thread(target=main_recv, name='main_recv', daemon=True).start()
 
-try:
-    while True:
-        time.sleep(1)
-except KeyboardInterrupt:
-    running = False
-    logger.info('收到 Ctrl+C，准备退出')
+command_loop()
 
+running = False
 logger.info('程序退出。students=%s, previews=%s', list(students.keys()), list(previews.keys()))
