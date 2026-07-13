@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Label="UserMacros">
+    <KswordFrameRoot Condition="'$(KswordFrameRoot)'==''">D:\Projects\KswordFrame3.0\KswordFrame3.0</KswordFrameRoot>
+    <JiYuVcpkgInstalled Condition="'$(JiYuVcpkgInstalled)'==''">$(MSBuildThisFileDirectory)vcpkg_installed\x64-windows</JiYuVcpkgInstalled>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <OutDir>$(MSBuildThisFileDirectory)out\$(Configuration)\</OutDir>
+    <IntDir>$(MSBuildThisFileDirectory)obj\$(ProjectName)\$(Configuration)\</IntDir>
+    <TargetName>$(ProjectName)</TargetName>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)src;$(KswordFrameRoot);$(KswordFrameRoot)\fltk\include;$(JiYuVcpkgInstalled)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_WINDOWS;NOMINMAX;WIN32_LEAN_AND_MEAN;UNICODE;_UNICODE;_WIN32_WINNT=0x0601;BOOST_ALL_NO_LIB;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ConformanceMode>true</ConformanceMode>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <WarningLevel>Level3</WarningLevel>
+      <DisableSpecificWarnings>4005;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <AdditionalOptions>/utf-8 /permissive- /Zc:char8_t- %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;gdiplus.lib;ole32.lib;uuid.lib;comctl32.lib;gdi32.lib;user32.lib;kernel32.lib;shell32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <SubSystem>Console</SubSystem>
+    </Link>
+  </ItemDefinitionGroup>
+
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <Optimization>Disabled</Optimization>
+      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
+    </ClCompile>
+    <Link>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <IncrementalLink>true</IncrementalLink>
+    </Link>
+  </ItemDefinitionGroup>
+
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <Optimization>MaxSpeed</Optimization>
+      <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <DebugInformationFormat>None</DebugInformationFormat>
+    </ClCompile>
+    <Link>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <IncrementalLink>false</IncrementalLink>
+    </Link>
+  </ItemDefinitionGroup>
+
+  <Target Name="ValidateJiYuNativeDependencies" BeforeTargets="PrepareForBuild">
+    <Error Condition="!Exists('$(KswordFrameRoot)\KswordGUI\KswordStyle.h')" Text="KswordFrame3.0 not found. Set /p:KswordFrameRoot=... ; current value: $(KswordFrameRoot)" />
+    <Error Condition="'$(Configuration)'=='Debug' And !Exists('$(KswordFrameRoot)\fltk\Debug\lib\fltkd.lib')" Text="Debug FLTK static library not found under $(KswordFrameRoot)\fltk\Debug\lib" />
+    <Error Condition="'$(Configuration)'=='Release' And !Exists('$(KswordFrameRoot)\fltk\Release\lib\fltk.lib')" Text="Release FLTK static library not found under $(KswordFrameRoot)\fltk\Release\lib" />
+    <Error Condition="!Exists('$(JiYuVcpkgInstalled)\include\boost\asio.hpp')" Text="Boost.Asio headers not found. Run from cpp-gui: C:\Users\Administrator\Downloads\vcpkg.exe install --triplet x64-windows --x-manifest-root=. --x-install-root=vcpkg_installed" />
+  </Target>
+</Project>

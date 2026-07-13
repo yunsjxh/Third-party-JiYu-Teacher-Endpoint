@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source">
+      <UniqueIdentifier>{2E4D90E4-DA3C-4F54-94EA-7025C3D947DA}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Headers">
+      <UniqueIdentifier>{03982A81-4F0E-4E03-85C9-843630A39F7F}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Tests">
+      <UniqueIdentifier>{9F9A9213-6120-428F-9C87-23C4E5E062E1}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="KswordFrame3.0">
+      <UniqueIdentifier>{EC3C1C51-D27D-4D3A-8A41-903E4CD6D91C}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="KswordFrame3.0\\KswordGUI">
+      <UniqueIdentifier>{275439FE-176E-4D78-A71C-E79147B1EA50}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="KswordFrame3.0\\KswordHelper">
+      <UniqueIdentifier>{70C07664-93C3-494E-9B99-64F8C75C6B00}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="KswordFrame3.0\\KswordWinAPICore">
+      <UniqueIdentifier>{9AAE7E0B-306E-4012-86C4-A20653F9F217}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Project">
+      <UniqueIdentifier>{C7E57A54-5028-4619-86B3-7F97FA7D6339}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ClCompile Include="tests\protocol_tests.cpp">
+      <Filter>Tests</Filter>
+    </ClCompile>
+    <ClCompile Include="src\protocol.cpp">
+      <Filter>Source</Filter>
+    </ClCompile>
+    <ClCompile Include="src\preview_reassembler.cpp">
+      <Filter>Source</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\protocol.hpp">
+      <Filter>Headers</Filter>
+    </ClInclude>
+    <ClInclude Include="src\preview_reassembler.hpp">
+      <Filter>Headers</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="README.md">
+      <Filter>Project</Filter>
+    </None>
+    <None Include="vcpkg.json">
+      <Filter>Project</Filter>
+    </None>
+    <None Include="JiYuCommon.props">
+      <Filter>Project</Filter>
+    </None>
+    <None Include="build-msbuild.ps1">
+      <Filter>Project</Filter>
+    </None>
+  </ItemGroup>
+</Project>

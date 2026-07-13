@@ -1,0 +1,9 @@
+# Build products
+.vs/
+out/
+obj/
+build/
+*.vcxproj.user
+
+# vcpkg installed tree is local/generated
+vcpkg_installed/

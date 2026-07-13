@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{D5E7B930-62D0-4B6C-B40D-5FE0F63245F0}</ProjectGuid>
+    <RootNamespace>JiYuTeacherGui</RootNamespace>
+    <ProjectName>JiYuTeacherGui</ProjectName>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <VcpkgEnabled>false</VcpkgEnabled>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="Shared" />
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <Import Project="JiYuCommon.props" />
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Link>
+      <AdditionalLibraryDirectories>$(KswordFrameRoot)\fltk\Debug\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>fltkd.lib;fltk_formsd.lib;fltk_gld.lib;fltk_imagesd.lib;fltk_jpegd.lib;fltk_pngd.lib;fltk_zd.lib;opengl32.lib;comdlg32.lib;advapi32.lib;winspool.lib;oleaut32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Link>
+      <AdditionalLibraryDirectories>$(KswordFrameRoot)\fltk\Release\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>fltk.lib;fltk_forms.lib;fltk_gl.lib;fltk_images.lib;fltk_jpeg.lib;fltk_png.lib;fltk_z.lib;opengl32.lib;comdlg32.lib;advapi32.lib;winspool.lib;oleaut32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="src\main.cpp" />
+    <ClCompile Include="src\app_gui.cpp" />
+    <ClCompile Include="src\copyable_widgets.cpp" />
+    <ClCompile Include="src\protocol.cpp" />
+    <ClCompile Include="src\preview_reassembler.cpp" />
+    <ClCompile Include="src\image_fix.cpp" />
+    <ClCompile Include="src\teacher_service.cpp" />
+    <ClCompile Include="$(KswordFrameRoot)\KswordGUI\KswordStyle.cpp" />
+    <ClCompile Include="$(KswordFrameRoot)\KswordGUI\KDataView.cpp" />
+    <ClCompile Include="$(KswordFrameRoot)\KswordGUI\KDock.cpp" />
+    <ClCompile Include="$(KswordFrameRoot)\KswordGUI\KIcon.cpp" />
+    <ClCompile Include="$(KswordFrameRoot)\KswordGUI\KImage.cpp" />
+    <ClCompile Include="$(KswordFrameRoot)\KswordGUI\KLayout.cpp" />
+    <ClCompile Include="$(KswordFrameRoot)\KswordGUI\KNavigation.cpp" />
+    <ClCompile Include="$(KswordFrameRoot)\KswordGUI\KOverlay.cpp" />
+    <ClCompile Include="$(KswordFrameRoot)\KswordGUI\KShowcasePages.cpp" />
+    <ClCompile Include="$(KswordFrameRoot)\KswordGUI\KTable.cpp" />
+    <ClCompile Include="$(KswordFrameRoot)\KswordGUI\KTheme.cpp" />
+    <ClCompile Include="$(KswordFrameRoot)\KswordGUI\KTitleBar.cpp" />
+    <ClCompile Include="$(KswordFrameRoot)\KswordGUI\KVisual.cpp" />
+    <ClCompile Include="$(KswordFrameRoot)\KswordGUI\KWidgetFactories.cpp" />
+    <ClCompile Include="$(KswordFrameRoot)\KswordGUI\KWidgets.cpp" />
+    <ClCompile Include="$(KswordFrameRoot)\KswordHelper\KJson.cpp" />
+    <ClCompile Include="$(KswordFrameRoot)\KswordHelper\KObject.cpp" />
+    <ClCompile Include="$(KswordFrameRoot)\KswordHelper\KSettings.cpp" />
+    <ClCompile Include="$(KswordFrameRoot)\KswordHelper\KString.cpp" />
+    <ClCompile Include="$(KswordFrameRoot)\KswordHelper\KVariant.cpp" />
+    <ClCompile Include="$(KswordFrameRoot)\KswordWinAPICore\Environment.cpp" />
+    <ClCompile Include="$(KswordFrameRoot)\KswordWinAPICore\KLog.cpp" />
+    <ClCompile Include="$(KswordFrameRoot)\KswordWinAPICore\ksword.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\app_gui.hpp" />
+    <ClInclude Include="src\copyable_widgets.hpp" />
+    <ClInclude Include="src\image_fix.hpp" />
+    <ClInclude Include="src\preview_reassembler.hpp" />
+    <ClInclude Include="src\protocol.hpp" />
+    <ClInclude Include="src\teacher_service.hpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="README.md" />
+    <None Include="vcpkg.json" />
+    <None Include="JiYuCommon.props" />
+    <None Include="build-msbuild.ps1" />
+  </ItemGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets" />
+</Project>
