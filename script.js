@@ -7,7 +7,9 @@ const logMessages = [
   "[ANNO] session beacon sent",
   "[LOGI] 192.168.2.139 handshake accepted",
   "[KACA] discovery packet -> WACA",
-  "[MESS] [WiFi可用网络数量] -1",
+  "[黑屏安静] -> 192.168.2.139, lock=1, timeout=10秒",
+  "[AutoUnlock] 超时自动解锁 192.168.2.139",
+  "[MESS] [窗口标题] Program Manager",
   "[TNAL] fragment 16384/49152",
   "[Preview] fixed JPEG saved",
 ];
