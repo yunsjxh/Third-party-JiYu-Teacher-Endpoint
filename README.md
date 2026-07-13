@@ -2,7 +2,6 @@
 
 [![GitHub stars](https://img.shields.io/github/stars/yunsjxh/Third-party-JiYu-Teacher-Endpoint?style=social)](https://github.com/yunsjxh/Third-party-JiYu-Teacher-Endpoint/stargazers)
 [![GitHub forks](https://img.shields.io/github/forks/yunsjxh/Third-party-JiYu-Teacher-Endpoint?style=social)](https://github.com/yunsjxh/Third-party-JiYu-Teacher-Endpoint/network/members)
-[![GitHub release](https://img.shields.io/github/v/release/yunsjxh/Third-party-JiYu-Teacher-Endpoint)](https://github.com/yunsjxh/Third-party-JiYu-Teacher-Endpoint/releases)
 
 一个用 Python 实现的**第三方极域课堂管理系统 V6.0 教师端模拟器**。本项目基于对官方教师端可执行文件的 **IDA Pro 静态逆向分析**以及真实网络抓包，还原出教师端与学生端之间的 UDP 通信协议，从而让学生端将本机识别为合法教师机，并接收登录、保活、控制请求以及屏幕缩略图等数据。
 
