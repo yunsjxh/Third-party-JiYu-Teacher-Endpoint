@@ -90,6 +90,9 @@ void testPackets() {
     expect(readLe32(bsText, 16) == 43, "black text Python-compatible len field");
     expect(bsText.size() == 56, "black text actual total is header + 36 + utf16z");
 
+    auto bsTextColor = buildBlackscreenMessage("192.168.2.139", true, 10, "A", 0x000000FF);
+    expect(readLe32(bsTextColor, 44) == 0x000000FF, "black custom COLORREF field");
+
     auto unlock = buildUnlockMessage("192.168.2.139");
     expect(unlock.size() == 29, "unlock size");
     expect(readLe32(unlock, 16) == 0x0d, "unlock payload len");

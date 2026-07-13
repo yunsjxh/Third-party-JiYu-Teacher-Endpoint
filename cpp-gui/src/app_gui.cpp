@@ -10,12 +10,21 @@
 #include "Fl_Text_Buffer.H"
 #include "fl_draw.H"
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <shlobj.h>
+
 #include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <exception>
 #include <filesystem>
 #include <iomanip>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -48,10 +57,91 @@ std::string formatDateTime(std::chrono::system_clock::time_point tp) {
 }
 
 std::filesystem::path desktopPath() {
-    if (const char* profile = std::getenv("USERPROFILE")) {
-        return std::filesystem::path(profile) / "Desktop";
+    PWSTR known_desktop = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &known_desktop)) && known_desktop) {
+        std::filesystem::path result(known_desktop);
+        CoTaskMemFree(known_desktop);
+        return result;
+    }
+    if (known_desktop) {
+        CoTaskMemFree(known_desktop);
+    }
+
+    wchar_t profile[MAX_PATH]{};
+    constexpr DWORD profile_capacity = static_cast<DWORD>(sizeof(profile) / sizeof(profile[0]));
+    const DWORD profile_len = GetEnvironmentVariableW(L"USERPROFILE", profile, profile_capacity);
+    if (profile_len > 0 && profile_len < profile_capacity) {
+        return std::filesystem::path(profile) / L"Desktop";
     }
     return std::filesystem::current_path();
+}
+
+std::string wideToUtf8(const std::wstring& wide) {
+    if (wide.empty()) {
+        return {};
+    }
+    const int needed = WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr);
+    if (needed <= 0) {
+        return {};
+    }
+    std::string out(static_cast<std::size_t>(needed), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), out.data(), needed, nullptr, nullptr);
+    return out;
+}
+
+std::string pathToUtf8(const std::filesystem::path& path) {
+    return wideToUtf8(path.wstring());
+}
+
+std::string trim(std::string text) {
+    auto is_space = [](unsigned char ch) { return std::isspace(ch) != 0; };
+    text.erase(text.begin(), std::find_if(text.begin(), text.end(), [&](char ch) { return !is_space(static_cast<unsigned char>(ch)); }));
+    text.erase(std::find_if(text.rbegin(), text.rend(), [&](char ch) { return !is_space(static_cast<unsigned char>(ch)); }).base(), text.end());
+    return text;
+}
+
+std::optional<std::uint32_t> parseBlackTextColor(const std::string& raw) {
+    std::string text = trim(raw);
+    if (text.empty()) {
+        return 0x0000FFFF;
+    }
+
+    std::string lower;
+    lower.reserve(text.size());
+    for (unsigned char ch : text) {
+        lower.push_back(static_cast<char>(std::tolower(ch)));
+    }
+
+    if (text == "黄色" || lower == "yellow") return 0x0000FFFF;
+    if (text == "白色" || lower == "white") return 0x00FFFFFF;
+    if (text == "红色" || lower == "red") return 0x000000FF;
+    if (text == "绿色" || lower == "green") return 0x0000FF00;
+    if (text == "蓝色" || lower == "blue") return 0x00FF0000;
+
+    try {
+        if (lower.rfind("0x", 0) == 0) {
+            const unsigned long value = std::stoul(lower.substr(2), nullptr, 16);
+            if (value <= 0x00FFFFFFUL) {
+                return static_cast<std::uint32_t>(value);
+            }
+            return std::nullopt;
+        }
+
+        if (!text.empty() && text[0] == '#') {
+            text.erase(text.begin());
+        }
+        if (text.size() == 6 && std::all_of(text.begin(), text.end(), [](unsigned char ch) { return std::isxdigit(ch) != 0; })) {
+            const unsigned long rgb = std::stoul(text, nullptr, 16);
+            const std::uint32_t r = static_cast<std::uint32_t>((rgb >> 16) & 0xff);
+            const std::uint32_t g = static_cast<std::uint32_t>((rgb >> 8) & 0xff);
+            const std::uint32_t b = static_cast<std::uint32_t>(rgb & 0xff);
+            return (b << 16) | (g << 8) | r;
+        }
+    } catch (...) {
+        return std::nullopt;
+    }
+
+    return std::nullopt;
 }
 
 class CleanLabel : public Fl_Box {
@@ -210,22 +300,31 @@ private:
         auto* unlock_all = KCreateButton(1028, 202, 110, 34, "全员解锁", KBUTTON_LIGHT);
         unlock_all->callback(UnlockAllThunk, this);
 
-        auto* chat_label = createLabel(692, 254, 72, 22, "提示/聊天", true);
+        auto* chat_label = createLabel(692, 254, 72, 22, "聊天内容", true);
         (void)chat_label;
-        chat_input_ = new CopyableTextBox(772, 246, 286, 44, nullptr);
+        chat_input_ = new CopyableTextBox(772, 246, 286, 34, nullptr);
         chat_input_->value("请认真听课");
-        auto* send_chat = KCreateButton(1070, 252, 72, 34, "发送", KBUTTON_HEAVY);
+        auto* send_chat = KCreateButton(1070, 246, 72, 34, "发送", KBUTTON_HEAVY);
         send_chat->callback(ChatThunk, this);
 
-        lock_check_ = KCreateCheckBox(692, 318, 104, 28, "锁键鼠");
+        auto* black_text_label = createLabel(692, 296, 72, 22, "黑屏内容", true);
+        (void)black_text_label;
+        black_text_input_ = new CopyableTextBox(772, 288, 286, 34, nullptr);
+        black_text_input_->value("请认真听课");
+        auto* color_label = createLabel(1070, 296, 38, 22, "颜色", true);
+        (void)color_label;
+        black_color_input_ = new CopyableTextBox(1110, 288, 64, 34, nullptr);
+        black_color_input_->value("#FFFF00");
+
+        lock_check_ = KCreateCheckBox(692, 340, 104, 28, "锁键鼠");
         lock_check_->value(1);
         lock_check_->color(KThemeManager::instance().theme().panelBg);
         lock_check_->selection_color(KThemeManager::instance().theme().primary);
-        auto* black = KCreateButton(806, 316, 118, 34, "黑屏10秒", KBUTTON_HEAVY);
+        auto* black = KCreateButton(806, 338, 118, 34, "黑屏10秒", KBUTTON_HEAVY);
         black->callback(BlackThunk, this);
-        auto* black_perm = KCreateButton(934, 316, 116, 34, "永久黑屏", KBUTTON_LIGHT);
+        auto* black_perm = KCreateButton(934, 338, 116, 34, "永久黑屏", KBUTTON_LIGHT);
         black_perm->callback(BlackPermThunk, this);
-        auto* clear_text = createLabel(692, 370, 470, 32, "黑屏提示文字复用上方文本；10 秒黑屏会自动解锁，永久黑屏需手动解锁。", true);
+        auto* clear_text = createLabel(692, 382, 492, 24, "黑屏内容独立于聊天；颜色支持 #RRGGBB、0x00BBGGRR 或 黄色/白色/红色/绿色/蓝色。", true);
         action_card->end();
 
         auto* preview_card = KCreateCard(16, 438, 536, 270, nullptr);
@@ -306,7 +405,8 @@ private:
             updateSelectedLabel();
             const auto& info = students_[static_cast<std::size_t>(row)];
             if (!info.fixed_preview.empty() && std::filesystem::exists(info.fixed_preview)) {
-                preview_view_->setImagePath(info.fixed_preview.string().c_str());
+                const std::string preview_path = pathToUtf8(info.fixed_preview);
+                preview_view_->setImagePath(preview_path.c_str());
             }
         }
     }
@@ -344,8 +444,14 @@ private:
         const auto ip = selectedIpOrWarn();
         if (ip.empty()) return;
         const bool lock_input = lock_check_->value() != 0;
-        const char* text = chat_input_->value();
-        service_.sendBlackscreen(ip, lock_input, permanent ? 0 : 10, text ? text : "");
+        const char* text = black_text_input_ ? black_text_input_->value() : "";
+        const char* color_text = black_color_input_ ? black_color_input_->value() : "";
+        const auto color = parseBlackTextColor(color_text ? color_text : "");
+        if (!color) {
+            KShowMessage("颜色格式无效", "黑屏文字颜色支持：#RRGGBB、0x00BBGGRR，或 黄色/白色/红色/绿色/蓝色。");
+            return;
+        }
+        service_.sendBlackscreen(ip, lock_input, permanent ? 0 : 10, text ? text : "", *color);
     }
 
     void onUnlockSelected() {
@@ -363,7 +469,8 @@ private:
             appendLog(event.level, event.message, event.student_ip);
             if (!event.fixed_preview_path.empty()) {
                 selected_ip_ = event.student_ip;
-                preview_view_->setImagePath(event.fixed_preview_path.string().c_str());
+                const std::string preview_path = pathToUtf8(event.fixed_preview_path);
+                preview_view_->setImagePath(preview_path.c_str());
             }
         }
         refreshStudents();
@@ -387,7 +494,8 @@ private:
             students_table_->set_cell(static_cast<int>(row), 3, active.c_str());
             students_table_->set_cell(static_cast<int>(row), 4, s.preview_status.c_str());
             if (s.ip == selected_ip_ && !s.fixed_preview.empty() && std::filesystem::exists(s.fixed_preview)) {
-                preview_view_->setImagePath(s.fixed_preview.string().c_str());
+                const std::string preview_path = pathToUtf8(s.fixed_preview);
+                preview_view_->setImagePath(preview_path.c_str());
             }
         }
         students_table_->redraw();
@@ -466,6 +574,8 @@ private:
     KTable* students_table_ = nullptr;
     KCheckBox* lock_check_ = nullptr;
     CopyableTextBox* chat_input_ = nullptr;
+    CopyableTextBox* black_text_input_ = nullptr;
+    CopyableTextBox* black_color_input_ = nullptr;
     CopyableTextDisplay* log_display_ = nullptr;
     KImageView* preview_view_ = nullptr;
     std::vector<StudentInfo> students_;

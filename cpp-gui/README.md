@@ -37,10 +37,14 @@ Or use:
 
 ## Dependencies
 
-Expected local paths:
+The GUI project is self-contained for the Ksword/FLTK UI layer:
 
-- KswordFrame3.0: `D:\Projects\KswordFrame3.0\KswordFrame3.0`
+- Vendored KswordFrame3.0: `cpp-gui\vendor\KswordFrame3.0`
+- Vendored FLTK headers/libs: `cpp-gui\vendor\KswordFrame3.0\fltk`
 - Boost.Asio headers: `cpp-gui\vcpkg_installed\x64-windows\include`
+
+You no longer need `D:\Projects\KswordFrame3.0` on another machine unless you
+explicitly want to override the bundled framework copy.
 
 If Boost headers are missing, restore them with the existing vcpkg executable:
 
@@ -51,5 +55,5 @@ C:\Users\Administrator\Downloads\vcpkg.exe install --triplet x64-windows --x-man
 You can override dependency paths when building:
 
 ```powershell
-msbuild .\JiYuTeacherCppGui.sln /m /p:Configuration=Debug /p:Platform=x64 /p:KswordFrameRoot=D:\Projects\KswordFrame3.0\KswordFrame3.0 /p:JiYuVcpkgInstalled=D:\path\to\vcpkg_installed\x64-windows
+msbuild .\JiYuTeacherCppGui.sln /m /p:Configuration=Debug /p:Platform=x64 /p:KswordFrameRoot=D:\path\to\KswordFrame3.0 /p:JiYuVcpkgInstalled=D:\path\to\vcpkg_installed\x64-windows
 ```

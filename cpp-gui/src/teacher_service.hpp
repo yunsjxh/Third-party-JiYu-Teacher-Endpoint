@@ -56,9 +56,9 @@ public:
     void requestPreview(const std::string& student_ip);
     void requestPreviewAll();
     void sendChat(const std::string& student_ip, const std::string& text);
-    void sendBlackscreen(const std::string& student_ip, bool lock_input, std::uint32_t timeout_seconds, const std::string& text);
+    void sendBlackscreen(const std::string& student_ip, bool lock_input, std::uint32_t timeout_seconds, const std::string& text, std::uint32_t text_color = 0x0000FFFF);
     void sendUnlock(const std::string& student_ip);
-    void sendBlackscreenAll(bool lock_input, std::uint32_t timeout_seconds, const std::string& text);
+    void sendBlackscreenAll(bool lock_input, std::uint32_t timeout_seconds, const std::string& text, std::uint32_t text_color = 0x0000FFFF);
     void sendUnlockAll();
     void setDebugLogging(bool enabled);
     bool debugLogging() const;

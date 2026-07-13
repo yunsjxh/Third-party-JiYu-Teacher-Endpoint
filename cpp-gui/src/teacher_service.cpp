@@ -7,6 +7,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <shlobj.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -33,10 +34,40 @@ std::string endpointAddress(const udp::endpoint& endpoint) {
 }
 
 std::filesystem::path desktopPath() {
-    if (const char* profile = std::getenv("USERPROFILE")) {
-        return std::filesystem::path(profile) / "Desktop";
+    PWSTR known_desktop = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &known_desktop)) && known_desktop) {
+        std::filesystem::path result(known_desktop);
+        CoTaskMemFree(known_desktop);
+        return result;
+    }
+    if (known_desktop) {
+        CoTaskMemFree(known_desktop);
+    }
+
+    wchar_t profile[MAX_PATH]{};
+    constexpr DWORD profile_capacity = static_cast<DWORD>(sizeof(profile) / sizeof(profile[0]));
+    const DWORD profile_len = GetEnvironmentVariableW(L"USERPROFILE", profile, profile_capacity);
+    if (profile_len > 0 && profile_len < profile_capacity) {
+        return std::filesystem::path(profile) / L"Desktop";
     }
     return std::filesystem::current_path();
+}
+
+std::string wideToUtf8(const std::wstring& wide) {
+    if (wide.empty()) {
+        return {};
+    }
+    const int needed = WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr);
+    if (needed <= 0) {
+        return {};
+    }
+    std::string out(static_cast<std::size_t>(needed), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), out.data(), needed, nullptr, nullptr);
+    return out;
+}
+
+std::string pathToUtf8(const std::filesystem::path& path) {
+    return wideToUtf8(path.wstring());
 }
 
 std::string ipForFilename(std::string ip) {
@@ -238,9 +269,9 @@ void TeacherService::sendChat(const std::string& student_ip, const std::string& 
     });
 }
 
-void TeacherService::sendBlackscreen(const std::string& student_ip, bool lock_input, std::uint32_t timeout_seconds, const std::string& text) {
-    boost::asio::post(io_, [this, student_ip, lock_input, timeout_seconds, text] {
-        sendSessionMulticast(protocol::buildBlackscreenMessage(student_ip, lock_input, timeout_seconds, text));
+void TeacherService::sendBlackscreen(const std::string& student_ip, bool lock_input, std::uint32_t timeout_seconds, const std::string& text, std::uint32_t text_color) {
+    boost::asio::post(io_, [this, student_ip, lock_input, timeout_seconds, text, text_color] {
+        sendSessionMulticast(protocol::buildBlackscreenMessage(student_ip, lock_input, timeout_seconds, text, text_color));
         if (lock_input) {
             sendMainTo(student_ip, protocol::buildComdLock(true, command_sequence_++));
         }
@@ -250,7 +281,8 @@ void TeacherService::sendBlackscreen(const std::string& student_ip, bool lock_in
         }
         std::ostringstream oss;
         oss << "[命令] 黑屏安静 -> " << student_ip << ", lock=" << (lock_input ? 1 : 0)
-            << ", timeout=" << timeout_seconds << ", text=" << text;
+            << ", timeout=" << timeout_seconds << ", text=" << text
+            << ", color=0x" << std::hex << std::uppercase << std::setw(8) << std::setfill('0') << text_color;
         pushEvent("INFO", oss.str(), student_ip);
     });
 }
@@ -263,9 +295,9 @@ void TeacherService::sendUnlock(const std::string& student_ip) {
     });
 }
 
-void TeacherService::sendBlackscreenAll(bool lock_input, std::uint32_t timeout_seconds, const std::string& text) {
+void TeacherService::sendBlackscreenAll(bool lock_input, std::uint32_t timeout_seconds, const std::string& text, std::uint32_t text_color) {
     for (const auto& ip : studentIpsLocked()) {
-        sendBlackscreen(ip, lock_input, timeout_seconds, text);
+        sendBlackscreen(ip, lock_input, timeout_seconds, text, text_color);
     }
 }
 
@@ -555,7 +587,7 @@ void TeacherService::handleCompletedPreview(const CompletedPreview& preview) {
         }
     }
     if (fixed_ok) {
-        pushEvent("INFO", "[Preview] saved fixed " + fixed_path.string(), preview.student_ip, raw_path, fixed_path);
+        pushEvent("INFO", "[Preview] saved fixed " + pathToUtf8(fixed_path), preview.student_ip, raw_path, fixed_path);
     } else {
         pushEvent("WARN", "[Preview] raw saved, fixed failed: " + fix_error, preview.student_ip, raw_path, {});
     }

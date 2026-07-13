@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <PropertyGroup Label="UserMacros">
-    <KswordFrameRoot Condition="'$(KswordFrameRoot)'==''">D:\Projects\KswordFrame3.0\KswordFrame3.0</KswordFrameRoot>
+    <KswordFrameRoot Condition="'$(KswordFrameRoot)'==''">$(MSBuildThisFileDirectory)vendor\KswordFrame3.0</KswordFrameRoot>
     <JiYuVcpkgInstalled Condition="'$(JiYuVcpkgInstalled)'==''">$(MSBuildThisFileDirectory)vcpkg_installed\x64-windows</JiYuVcpkgInstalled>
   </PropertyGroup>
 
@@ -40,6 +40,7 @@
     <Link>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <IncrementalLink>true</IncrementalLink>
+      <AdditionalOptions>/ignore:4099 %(AdditionalOptions)</AdditionalOptions>
     </Link>
   </ItemDefinitionGroup>
 
@@ -57,7 +58,7 @@
   </ItemDefinitionGroup>
 
   <Target Name="ValidateJiYuNativeDependencies" BeforeTargets="PrepareForBuild">
-    <Error Condition="!Exists('$(KswordFrameRoot)\KswordGUI\KswordStyle.h')" Text="KswordFrame3.0 not found. Set /p:KswordFrameRoot=... ; current value: $(KswordFrameRoot)" />
+    <Error Condition="!Exists('$(KswordFrameRoot)\KswordGUI\KswordStyle.h')" Text="KswordFrame3.0 not found. The default vendored path is cpp-gui\vendor\KswordFrame3.0. You can also set /p:KswordFrameRoot=... ; current value: $(KswordFrameRoot)" />
     <Error Condition="'$(Configuration)'=='Debug' And !Exists('$(KswordFrameRoot)\fltk\Debug\lib\fltkd.lib')" Text="Debug FLTK static library not found under $(KswordFrameRoot)\fltk\Debug\lib" />
     <Error Condition="'$(Configuration)'=='Release' And !Exists('$(KswordFrameRoot)\fltk\Release\lib\fltk.lib')" Text="Release FLTK static library not found under $(KswordFrameRoot)\fltk\Release\lib" />
     <Error Condition="!Exists('$(JiYuVcpkgInstalled)\include\boost\asio.hpp')" Text="Boost.Asio headers not found. Run from cpp-gui: C:\Users\Administrator\Downloads\vcpkg.exe install --triplet x64-windows --x-manifest-root=. --x-install-root=vcpkg_installed" />

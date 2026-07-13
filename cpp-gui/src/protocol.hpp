@@ -52,7 +52,7 @@ Bytes buildChatMessage(const std::string& student_ip, const std::string& text);
 Bytes buildComdCommandEx(std::uint32_t cmd_code, const Bytes& payload, const Bytes& guid, const Bytes& extra_header, std::uint32_t command_id);
 Bytes buildComdLock(bool lock, std::uint32_t command_id);
 Bytes buildBlackscreenMessPayload(bool lock_input, std::uint32_t timeout_seconds, const std::string& text, std::uint32_t text_color = 0x0000FFFF);
-Bytes buildBlackscreenMessage(const std::string& student_ip, bool lock_input, std::uint32_t timeout_seconds, const std::string& text);
+Bytes buildBlackscreenMessage(const std::string& student_ip, bool lock_input, std::uint32_t timeout_seconds, const std::string& text, std::uint32_t text_color = 0x0000FFFF);
 Bytes buildUnlockMessage(const std::string& student_ip);
 Bytes buildAnnoShort();
 Bytes buildAnnoLong(const std::string& teacher_ip);

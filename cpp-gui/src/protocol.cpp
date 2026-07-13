@@ -348,13 +348,13 @@ Bytes buildBlackscreenMessPayload(bool lock_input, std::uint32_t timeout_seconds
     return payload;
 }
 
-Bytes buildBlackscreenMessage(const std::string& student_ip, bool lock_input, std::uint32_t timeout_seconds, const std::string& text) {
+Bytes buildBlackscreenMessage(const std::string& student_ip, bool lock_input, std::uint32_t timeout_seconds, const std::string& text, std::uint32_t text_color) {
     Bytes out;
     appendLe32(out, kMess);
     appendLe32(out, 1);
     appendLe32(out, 1);
     appendBytes(out, ipv4Bytes(student_ip));
-    appendBytes(out, buildBlackscreenMessPayload(lock_input, timeout_seconds, text));
+    appendBytes(out, buildBlackscreenMessPayload(lock_input, timeout_seconds, text, text_color));
     return out;
 }
 
