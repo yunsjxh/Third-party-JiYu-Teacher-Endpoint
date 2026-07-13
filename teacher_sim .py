@@ -14,17 +14,51 @@ import subprocess
 LOG_DIR = os.path.join(os.path.expanduser('~'), 'Desktop')
 LOG_PATH = os.path.join(LOG_DIR, 'teacher_sim.log')
 
+# 默认文件日志级别：INFO 已足够，DEBUG 太占空间。
+# 运行中可用 debug on/off 切换。
+FILE_LOG_LEVEL = logging.INFO
+
+
+def get_file_handler():
+    """返回当前的文件日志 handler（不存在返回 None）。"""
+    for h in logging.getLogger().handlers:
+        if isinstance(h, logging.handlers.RotatingFileHandler):
+            return h
+    return None
+
+
+def set_file_log_level(level):
+    """切换文件日志级别并持久化到全局变量。"""
+    global FILE_LOG_LEVEL
+    FILE_LOG_LEVEL = level
+    fh = get_file_handler()
+    if fh:
+        fh.setLevel(level)
+
+
+def clear_old_logs():
+    """启动时清理上一次的日志文件，避免累积过大。"""
+    for path in [LOG_PATH] + [f'{LOG_PATH}.{i}' for i in range(1, 4)]:
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError as e:
+            # 如果删不掉（比如被其他进程占用），至少不要阻止程序启动
+            print(f'[警告] 删除旧日志 {path} 失败：{e}', file=sys.stderr)
+
 
 def setup_logging():
     logger = logging.getLogger()
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.DEBUG)  # 允许 DEBUG 通过，由 handler 决定是否写入
     if logger.handlers:
         logger.handlers.clear()
+
+    clear_old_logs()
 
     fh = logging.handlers.RotatingFileHandler(
         LOG_PATH, maxBytes=10*1024*1024, backupCount=3, encoding='utf-8'
     )
-    fh.setLevel(logging.DEBUG)
+    fh.setLevel(FILE_LOG_LEVEL)
     fmt = logging.Formatter(
         '%(asctime)s.%(msecs)03d [%(levelname)-8s] [%(threadName)-12s] %(filename)s:%(lineno)d - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
@@ -39,7 +73,8 @@ def setup_logging():
     # ch.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
     # logger.addHandler(ch)
 
-    logger.info('日志系统初始化完成，log 文件：%s', LOG_PATH)
+    logger.info('日志系统初始化完成，级别=%s，log 文件：%s',
+                logging.getLevelName(FILE_LOG_LEVEL), LOG_PATH)
     return logger
 
 
@@ -75,6 +110,7 @@ SMCAST, SPORT = '225.2.2.1', 5512
 TGUID = uuid.UUID('{F96A6D19-5B29-46B9-AB95-8A143ECDDC26}')
 
 oonc_seq = 0
+cmd_seq = 0
 
 MAGIC_NAMES = {
     0x434E4F4F: 'OONC',
@@ -205,10 +241,12 @@ def send_chat(sip, text):
         return
     try:
         text_utf16 = text.encode('utf-16-le') + b'\x00\x00'
+        # [12..15] 经测试应设为 UTF-16 码元数（含结尾空字符），否则学生端可能只显示第一个字。
+        wchar_count = len(text_utf16) // 2
         payload = (struct.pack('<I', 16 + len(text_utf16))
                    + struct.pack('<I', 0x800)
                    + struct.pack('<I', 0)
-                   + struct.pack('<I', 1)
+                   + struct.pack('<I', wchar_count)
                    + text_utf16)
         mess = (struct.pack('<II', 0x5353454D, 1)
                 + struct.pack('<I', 1)
@@ -220,6 +258,201 @@ def send_chat(sip, text):
     except Exception as e:
         logger.error('[命令] 发送聊天消息失败：%s', e, exc_info=True)
         print(f'[命令] 发送失败：{e}')
+
+
+def build_comd_command(cmd_code, payload):
+    """构造 COMD 命令包（Magic=0x434F4D44，即代码中的 DMOC）。"""
+    global cmd_seq
+    cmd_id = cmd_seq
+    cmd_seq += 1
+    inner = (struct.pack('<I', cmd_code)
+             + struct.pack('<I', cmd_id)
+             + struct.pack('<I', len(payload))
+             + struct.pack('<I', 0)      # reserved
+             + payload)
+    return (struct.pack('<II', 0x434F4D44, 0x10000)
+            + struct.pack('<I', len(inner))
+            + bytes.fromhex('ce90fd383df5844c857fa35183c051f3')
+            + inner)
+
+
+def build_comd_command_ex(cmd_code, payload, guid_hex, extra_header=b''):
+    """构造 COMD 命令包，可自定义 GUID 与 GUID 后的额外头。"""
+    global cmd_seq
+    cmd_id = cmd_seq
+    cmd_seq += 1
+    inner = (struct.pack('<I', cmd_code)
+             + struct.pack('<I', cmd_id)
+             + struct.pack('<I', len(payload))
+             + struct.pack('<I', 0)
+             + payload)
+    return (struct.pack('<II', 0x434F4D44, 0x10000)
+            + struct.pack('<I', len(extra_header) + len(inner))
+            + bytes.fromhex(guid_hex)
+            + extra_header
+            + inner)
+
+
+def build_blackscreen_mess_payload(lock_input=True, timeout=10, text=None, text_color=0x0000FFFF):
+    """构造黑屏安静命令的 MESS payload。
+
+    逐字节匹配真实抓包（教师端 sub_54C4E0，MESS type=0x20）。
+
+    抓包验证结构（Line 223, 教师→组播 225.2.2.1:5512）：
+      [0..3]  = 总长度 (基础 39 字节 + 可选文本)
+      [4..7]  = 0x20 (黑屏)
+      [8..11] = 0x80000000 (启动标志)
+      [12..15]= lock_input (1=锁定键鼠)
+      [16..19]= 0x01 (field_1)
+      [20..23]= timeout (超时秒数, 0=永久)
+      [24..27]= has_text (0/1)
+      [28..31]= text_color (Windows COLORREF: 0x00BBGGRR)
+      [32..35]= 0x00000000 (field_5)
+      [36..38]= 0xA00520 (padding, 仅 has_text=0 时)
+      [36..]  = UTF-16LE 文本 (has_text=1 时)
+
+    text_color 默认值 0x0000FFFF = 黄色 (R=255,G=255,B=0)，匹配真实教师端。
+    要白色用 0x00FFFFFF，红色用 0x000000FF。
+    """
+    has_text = 1 if text else 0
+    text_utf16 = b''
+    if has_text:
+        text_utf16 = (text.encode('utf-16-le') + b'\x00\x00') if text else b''
+
+    total_len = 39 + len(text_utf16)  # 基础 39 字节
+
+    payload = struct.pack('<I', total_len)               # [0] 总长
+    payload += struct.pack('<I', 0x20)                    # [4] 黑屏
+    payload += struct.pack('<I', 0x80000000)              # [8] 启动标志
+    payload += struct.pack('<I', 1 if lock_input else 0)  # [12] 锁定输入
+    payload += struct.pack('<I', 1)                       # [16] field_1=1
+    payload += struct.pack('<I', timeout)                 # [20] 超时
+    payload += struct.pack('<I', has_text)                # [24] 有自定义文字
+    payload += struct.pack('<I', text_color)              # [28] 文字颜色 (0x00BBGGRR)
+    payload += struct.pack('<I', 0)                       # [32] field_5
+    if has_text:
+        payload += text_utf16                             # [36+] UTF-16LE 文本
+    else:
+        payload += b'\xa0\x05\x20'                        # [36..38] padding (来自真实抓包)
+    return payload
+
+
+# 跟踪各学生的自动解锁定时器，方便手动解锁时取消
+blackscreen_timers = {}   # sip -> threading.Timer
+
+
+def _send_comd_lock(sip, lock=True):
+    """通过 COMD 路径锁定/解锁键鼠（sub_44A490 case 6）。
+
+    MESS 黑屏包负责显示黑屏窗口，COMD case 6 负责实际锁定键鼠。
+    真实教师端两条路径都会发。
+    """
+    payload = struct.pack('<I', 0x200)        # subcmd
+    payload += struct.pack('<I', 0)            # flags
+    payload += struct.pack('<I', 6)            # case 6 = 黑屏/锁键鼠
+    payload += struct.pack('<I', 1 if lock else 0)  # lock_input
+    payload += struct.pack('<I', 0)            # timer_flag
+    payload += struct.pack('<I', 10)           # timeout
+    payload += struct.pack('<I', 0)            # has_text
+    payload += b'\x00' * 8                    # padding
+    pkt = build_comd_command_ex(0x80000010, payload, 'f96a6d195b2946b9ab958a143ecddc26')
+    sock.sendto(pkt, (sip, PORT))
+    logger.info('[锁键鼠] COMD case6 lock=%s -> %s:%d', lock, sip, PORT)
+
+
+def send_blackscreen(sip, lock_input=True, timeout=10, text=None):
+    """向已登录学生发送黑屏安静命令。
+
+    MESS 协议 → 组播 225.2.2.1:5512（黑屏窗口 + bit 0x20 状态）
+    COMD 协议 → 学生单播 :4705（锁定键鼠，sub_44A490 case 6）
+
+    超时由教师端主动发解锁包实现——先发 flags=0x80000000（锁），
+    时间到再发 flags=0x90000000（解）。
+    """
+    if sip not in students:
+        print(f'[命令] 学生 {sip} 未登录')
+        return
+    try:
+        # 1) MESS 黑屏包 → 组播（创建黑屏窗口 + 设置 bit 0x20）
+        payload = build_blackscreen_mess_payload(lock_input, timeout, text)
+        mess = (struct.pack('<II', 0x5353454D, 1)
+                + struct.pack('<I', 1)
+                + socket.inet_aton(sip)
+                + payload)
+        sock2.sendto(mess, (SMCAST, SPORT))
+
+        # 2) COMD 锁键鼠 → 单播（实际锁定键盘和鼠标）
+        if lock_input:
+            _send_comd_lock(sip, lock=True)
+
+        # 取消之前的定时器
+        if sip in blackscreen_timers:
+            blackscreen_timers[sip].cancel()
+            del blackscreen_timers[sip]
+
+        if timeout > 0:
+            timeout_str = f'{timeout}秒后自动解锁'
+            t = threading.Timer(timeout, _auto_unlock, args=(sip,))
+            t.daemon = True
+            t.start()
+            blackscreen_timers[sip] = t
+        else:
+            timeout_str = '永久（需手动 unlock）'
+
+        logger.info('[命令] 黑屏安静 -> %s, lock=%s, timeout=%s, text=%s',
+                    sip, lock_input, timeout_str, text)
+        print(f'[命令] 已向 {sip} 发送黑屏安静（{timeout_str}）')
+    except Exception as e:
+        logger.error('[命令] 发送黑屏安静失败：%s', e, exc_info=True)
+        print(f'[命令] 发送失败：{e}')
+
+
+def _auto_unlock(sip):
+    """定时器回调：到了超时时间自动解锁。"""
+    if sip in blackscreen_timers:
+        del blackscreen_timers[sip]
+    if sip in students:
+        logger.info('[AutoUnlock] 超时自动解锁 %s', sip)
+        print(f'[自动] {sip} 黑屏超时，正在解锁...')
+        _do_unlock(sip)
+    else:
+        logger.info('[AutoUnlock] %s 已下线，跳过', sip)
+
+
+def _do_unlock(sip):
+    """同时通过 MESS + COMD 两条路径解锁。"""
+    try:
+        # MESS 解锁 → 组播（flags=0x90000000，清除 bit 0x20）
+        payload = (struct.pack('<I', 0x0D)
+                   + struct.pack('<I', 0x20)
+                   + struct.pack('<I', 0x90000000)
+                   + b'\x01')
+        mess = (struct.pack('<II', 0x5353454D, 1)
+                + struct.pack('<I', 1)
+                + socket.inet_aton(sip)
+                + payload)
+        sock2.sendto(mess, (SMCAST, SPORT))
+        logger.info('[解锁] MESS -> %s:%d 目标=%s', SMCAST, SPORT, sip)
+
+        # COMD 解锁 → 单播（lock_input=0，解除键鼠锁）
+        _send_comd_lock(sip, lock=False)
+    except Exception as e:
+        logger.error('[解锁] 发送失败：%s', e, exc_info=True)
+
+
+def send_unlock(sip):
+    """向已登录学生发送解锁命令（MESS + COMD 双路径）。"""
+    if sip not in students:
+        print(f'[命令] 学生 {sip} 未登录')
+        return
+    # 取消自动解锁定时器
+    if sip in blackscreen_timers:
+        blackscreen_timers[sip].cancel()
+        del blackscreen_timers[sip]
+    _do_unlock(sip)
+    print(f'[命令] 已向 {sip} 发送解锁')
+
+
 
 
 def build_dmoc():
@@ -248,11 +481,13 @@ def keep_alive_preview(sip):
             break
         try:
             sock.sendto(lp, (sip, PORT))
+            logger.debug('[KeepAlive] LPNT -> %s', sip)
         except Exception as e:
             logger.error('[KeepAlive] LPNT -> %s 失败：%s', sip, e, exc_info=True)
         time.sleep(0.05)
         try:
             sock.sendto(dm, (sip, PORT))
+            logger.debug('[KeepAlive] DMOC -> %s', sip)
         except Exception as e:
             logger.error('[KeepAlive] DMOC -> %s 失败：%s', sip, e, exc_info=True)
         time.sleep(0.5)
@@ -276,7 +511,7 @@ def handle_tnal(d, sip):
         return
 
     frag = d[48:48+frag_len]
-    logger.info('[TNAL] %s total=%d offset=%d frag_len=%d', sip, total, offset, frag_len)
+    logger.debug('[TNAL] %s total=%d offset=%d frag_len=%d', sip, total, offset, frag_len)
 
     if not frag or total == 0:
         logger.warning('[TNAL] 空片段或 total==0 from %s', sip)
@@ -296,7 +531,7 @@ def handle_tnal(d, sip):
 
     state['buf'][offset:end] = frag[:written]
     state['got'] += written
-    logger.info('[TNAL] %s 进度 %d/%d (+%d)', sip, state['got'], total, written)
+    logger.debug('[TNAL] %s 进度 %d/%d (+%d)', sip, state['got'], total, written)
 
     if state['got'] >= total:
         idx = 0
@@ -420,12 +655,14 @@ def broadcast():
     while running:
         try:
             sock.sendto(oonc(), (MCAST, PORT))
+            logger.debug('[Broadcast] OONC 已发送')
         except Exception as e:
             logger.error('[Broadcast] OONC 失败：%s', e, exc_info=True)
         time.sleep(0.5)
 
         try:
             sock.sendto(canc(), (MCAST, PORT))
+            logger.debug('[Broadcast] CANC 已发送')
         except Exception as e:
             logger.error('[Broadcast] CANC 失败：%s', e, exc_info=True)
         time.sleep(0.5)
@@ -438,6 +675,7 @@ def session_anno():
         try:
             pkt1 = struct.pack('<II', 0x4F4E4E41, 1)
             sock2.sendto(pkt1, (SMCAST, SPORT))
+            logger.debug('[Session] ANNO(type1) 已发送')
             time.sleep(0.3)
 
             pkt2 = (struct.pack('<III', 0x4F4E4E41, 1, 1)
@@ -449,6 +687,7 @@ def session_anno():
                     + struct.pack('<I', 1)
                     + b'\x00'*32)
             sock2.sendto(pkt2, (SMCAST, SPORT))
+            logger.debug('[Session] ANNO(type2) 已发送')
             time.sleep(0.7)
         except Exception as e:
             logger.error('[Session] 广播异常：%s', e, exc_info=True)
@@ -476,16 +715,32 @@ def session_recv():
 
             if mag == 0x49474F4C:  # LOGI
                 logger.info('[SessionRecv] LOGI from %s:%d', sip, sp)
+                already_logged_in = sip in students
 
-                mess = (struct.pack('<II', 0x5353454D, 1)
-                        + struct.pack('<I', 1)
-                        + socket.inet_aton(sip)
-                        + b'\x1b\x00\x00\x00\x00\x80\x00\x00'
-                        + b'\x00'*8
-                        + b'\xc6\x12\x20\x20\x20\x20\xb0\x34\x00\x27\x65')
-                sock2.sendto(mess, (sip, SPORT))
-                logger.info('[MESS] -> %s:%d, len=%d', sip, SPORT, len(mess))
+                # 1) 真实教师端第一条回复：msg_type=0x1000，总长 0x0d
+                mess1 = (struct.pack('<II', 0x5353454D, 1)
+                         + struct.pack('<I', 1)
+                         + socket.inet_aton(sip)
+                         + b'\x0d\x00\x00\x00\x00\x10\x00\x00'
+                         + b'\x00\x00\x00\x00\x00\x00\x00\x00')
+                sock2.sendto(mess1, (sip, SPORT))
+                logger.info('[MESS] type 0x1000 -> %s:%d, len=%d', sip, SPORT, len(mess1))
                 time.sleep(0.05)
+
+                # 2) 真实教师端第二条回复：msg_type=0x8000，总长 0x1b
+                mess2 = (struct.pack('<II', 0x5353454D, 1)
+                         + struct.pack('<I', 1)
+                         + socket.inet_aton(sip)
+                         + b'\x1b\x00\x00\x00\x00\x80\x00\x00'
+                         + b'\x00\x00\x00\x00\x00\x00\x00\x00'
+                         + b'\xc6\x12\x00\x00\x00\x00\xb0\x34\x00\x27\x00')
+                sock2.sendto(mess2, (sip, SPORT))
+                logger.info('[MESS] type 0x8000 -> %s:%d, len=%d', sip, SPORT, len(mess2))
+                time.sleep(0.05)
+
+                if already_logged_in:
+                    logger.info('[Login] %s 已是登录状态，不再重复启动 keepalive', sip)
+                    continue
 
                 lg = bytes.fromhex('aa3a8dbe2b906645908ea29526218540')
                 lp = struct.pack('<II', 0x544E504C, 0x10000) + struct.pack('<I', 20) + lg + b'\x02\x00\x00\x00\x00\x00\x00\x00\x50\x00\x00\x00\x3c\x00\x00\x00\x05\x00\x00\x00'
@@ -552,14 +807,20 @@ def main_recv():
                     sip, sp, magic_name(mag)
                 )
 
-            logger.info('[MainRecv] %s from %s:%d, len=%d', magic_name(mag), sip, sp, len(d))
+            # TRMC/TRNT 是心跳/预览就绪包，数量很大，默认用 DEBUG
+            if mag in (0x434D5254, 0x544E5254):
+                logger.debug('[MainRecv] %s from %s:%d, len=%d',
+                             magic_name(mag), sip, sp, len(d))
+            else:
+                logger.info('[MainRecv] %s from %s:%d, len=%d',
+                            magic_name(mag), sip, sp, len(d))
 
             if mag == 0x4143414B:  # KACA
                 logger.info('[MainRecv] KACA %s -> WACA', sip)
                 sock.sendto(waca(sip), (sip, PORT))
 
             elif mag == 0x434D5254:  # TRMC
-                logger.info('[MainRecv] TRMC %s -> LPNT+DMOC', sip)
+                logger.debug('[MainRecv] TRMC %s -> LPNT+DMOC', sip)
                 lp = build_lpnt_subtype3()
                 dm = build_dmoc()
                 sock.sendto(lp, (sip, PORT))
@@ -567,7 +828,7 @@ def main_recv():
                 sock.sendto(dm, (sip, PORT))
 
             elif mag == 0x544E5254:  # TRNT
-                logger.info('[MainRecv] TRNT %s 学生准备好预览', sip)
+                logger.debug('[MainRecv] TRNT %s 学生准备好预览', sip)
 
             elif mag == 0x544E4544:  # DENT
                 logger.info('[MainRecv] DENT %s -> TNRS', sip)
@@ -593,6 +854,28 @@ def main_recv():
 
 # -------------------- 命令行交互 --------------------
 
+def _parse_lock_text(args):
+    """从命令行参数解析 lock 标志和 text。
+
+    args: [可能是 '0'/'1'（lock）, 可能是 text]
+
+    返回 (lock, text)：
+      bs <ip>              → (True, None)
+      bs <ip> 0            → (False, None)
+      bs <ip> 1            → (True, None)
+      bs <ip> 0 消息       → (False, '消息')
+      bs <ip> 消息          → (True, '消息')    —— 首个非 0/1 的参数当作 text
+    """
+    lock = True
+    text = None
+    for a in args:
+        if a in ('0', '1') and text is None:
+            lock = (a == '1')
+        else:
+            text = a
+    return lock, text
+
+
 def cmd_help():
     print('''可用命令：
   help / ?              显示帮助
@@ -600,8 +883,18 @@ def cmd_help():
   preview <ip>          请求指定学生的屏幕预览
   all                   请求所有学生的屏幕预览
   msg <ip> <text>       向指定学生发送聊天消息
+  blackscreen / bs <ip> [lock=1|0] [text]   向指定学生发送黑屏安静（默认锁键鼠，10秒自动解锁）
+  bsperm / bsp <ip> [lock=1|0] [text]       向指定学生发送永久黑屏安静（需手动 unlock）
+  unlock <ip>           解锁指定学生的黑屏/键盘鼠标锁
+  bsall [lock=1|0] [text]  对所有已登录学生发送黑屏安静
+  unlock_all            对所有已登录学生发送解锁
+  debug on / off        切换文件日志级别（默认 INFO，on=DEBUG 会详细记录并占空间）
   exit / quit / q       退出程序
-''')
+
+  例：
+    bs 192.168.2.139              黑屏 + 锁键鼠，10秒自动解
+    bs 192.168.2.139 0            只黑屏不锁键鼠
+    bs 192.168.2.139 1 请认真听课  黑屏锁键鼠 + 自定义文字''')
 
 
 def cmd_list():
@@ -632,6 +925,19 @@ def cmd_all():
     print(f'[命令] 已向 {len(students)} 个学生请求预览')
 
 
+def cmd_debug(args):
+    if not args or args[0].lower() not in ('on', 'off'):
+        print(f'[命令] 用法：debug on/off（当前文件日志级别：{logging.getLevelName(FILE_LOG_LEVEL)}）')
+        return
+    if args[0].lower() == 'on':
+        set_file_log_level(logging.DEBUG)
+        print('[命令] 已开启 DEBUG 日志（文件会变大）')
+    else:
+        set_file_log_level(logging.INFO)
+        print('[命令] 已关闭 DEBUG 日志，仅保留 INFO 及以上')
+
+
+
 def command_loop():
     global running
     print('教师端已启动，输入 help 查看命令')
@@ -655,11 +961,45 @@ def command_loop():
             cmd_preview(args)
         elif cmd == 'all':
             cmd_all()
+        elif cmd == 'debug':
+            cmd_debug(args)
         elif cmd == 'msg':
             if len(args) < 2:
                 print('[命令] 用法：msg <学生IP> <消息内容>')
             else:
                 send_chat(args[0], args[1])
+        elif cmd in ('blackscreen', 'bs'):
+            if len(args) < 1:
+                print('[命令] 用法：blackscreen <学生IP> [lock=1|0] [提示文字]')
+            else:
+                lock, text = _parse_lock_text(args[1:])
+                send_blackscreen(args[0], lock_input=lock, timeout=10, text=text)
+        elif cmd in ('bsperm', 'bsp'):
+            if len(args) < 1:
+                print('[命令] 用法：bsperm <学生IP> [lock=1|0] [提示文字]')
+            else:
+                lock, text = _parse_lock_text(args[1:])
+                send_blackscreen(args[0], lock_input=lock, timeout=0, text=text)
+        elif cmd == 'unlock':
+            if len(args) < 1:
+                print('[命令] 用法：unlock <学生IP>')
+            else:
+                send_unlock(args[0])
+        elif cmd == 'bsall':
+            if not students:
+                print('[命令] 当前无学生登录')
+            else:
+                lock, text = _parse_lock_text(args)
+                for sip in list(students.keys()):
+                    send_blackscreen(sip, lock_input=lock, timeout=10, text=text)
+                    time.sleep(0.05)
+        elif cmd == 'unlock_all':
+            if not students:
+                print('[命令] 当前无学生登录')
+            else:
+                for sip in list(students.keys()):
+                    send_unlock(sip)
+                    time.sleep(0.05)
         elif cmd in ('exit', 'quit', 'q'):
             break
         else:
