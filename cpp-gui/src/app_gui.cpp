@@ -34,7 +34,7 @@ namespace jiyu::gui {
 namespace {
 
 constexpr int kWinW = 1420;
-constexpr int kWinH = 860;
+constexpr int kWinH = 990;
 
 std::string formatTime(std::chrono::system_clock::time_point tp) {
     if (tp.time_since_epoch().count() == 0) {
@@ -164,6 +164,34 @@ std::optional<std::uint32_t> parseUint32Text(const char* raw) {
     }
 }
 
+std::optional<std::uint32_t> parseUint32Flexible(const std::string& raw) {
+    std::string text = trim(raw);
+    if (text.empty()) {
+        return std::nullopt;
+    }
+    try {
+        std::size_t parsed = 0;
+        const unsigned long long value = std::stoull(text, &parsed, 0);
+        if (parsed != text.size() || value > std::numeric_limits<std::uint32_t>::max()) {
+            return std::nullopt;
+        }
+        return static_cast<std::uint32_t>(value);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::string lowerAscii(std::string text) {
+    for (char& ch : text) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return text;
+}
+
+bool containsFoldedAscii(const std::string& haystack, const std::string& needle) {
+    return lowerAscii(haystack).find(lowerAscii(needle)) != std::string::npos;
+}
+
 std::string hex32(std::uint32_t value) {
     std::ostringstream oss;
     oss << "0x" << std::uppercase << std::hex << std::setw(8) << std::setfill('0') << value;
@@ -252,8 +280,8 @@ private:
     static void PreviewThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onPreviewSelected(); }
     static void PreviewAllThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onPreviewAll(); }
     static void InfoThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onRequestInfo(0); }
-    static void ProcessThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onRequestInfo(1); }
-    static void WindowListThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onRequestInfo(2); }
+    static void ProcessThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onRequestInfo(2); }
+    static void WindowListThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onRequestInfo(1); }
     static void ChatThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onSendChat(); }
     static void BlackThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onBlack(false); }
     static void BlackPermThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onBlack(true); }
@@ -261,8 +289,13 @@ private:
     static void UnlockAllThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onUnlockAll(); }
     static void ShutdownThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onShutdown(false); }
     static void RebootThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onShutdown(true); }
+    static void KillThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onKillProcess(); }
+    static void CloseAppThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onCloseApplication(); }
+    static void OpenUrlThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onOpenUrl(); }
+    static void RunProgramThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onRunProgram(); }
     static void DebugThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onDebugToggle(); }
     static void TableThunk(Fl_Widget* widget, void* data) { static_cast<TeacherWindow*>(data)->onTableEvent(static_cast<KTable*>(widget)); }
+    static void ListTableThunk(Fl_Widget* widget, void* data) { static_cast<TeacherWindow*>(data)->onListTableEvent(static_cast<KTable*>(widget)); }
 
     void buildUi() {
         InitFlatThemeGlobal();
@@ -400,28 +433,58 @@ private:
         info_display_->set_text("请选择学生，或启动服务等待 LOGI。\n");
         detail_card->end();
 
-        auto* list_card = KCreateCard(936, 448, 468, 190, nullptr);
-        list_card->setTitle("进程 / 窗口列表");
-        list_card->setSubtitle("点击“进程”或“窗口”请求并切换列表；右键复制行");
+        auto* list_card = KCreateCard(936, 448, 468, 206, nullptr);
+        list_card->setTitle("进程 / 窗口管理");
+        list_card->setSubtitle("进程=type7，窗口=type6；点击行填入目标，右键复制行");
         list_card->begin();
-        list_table_ = new CleanTable(956, 500, 428, 112, nullptr);
+        list_table_ = new CleanTable(956, 500, 428, 82, nullptr);
         list_table_->set_size(0, 2);
         list_table_->set_col_header_label(0, "ID");
         list_table_->set_col_header_label(1, "名称 / 标题");
         list_table_->col_width(0, 112);
         list_table_->col_width(1, 300);
         list_table_->set_builtin_copy_context_menu_enabled(true);
+        list_table_->callback(ListTableThunk, this);
+        kill_target_input_ = new CopyableTextBox(956, 592, 186, 30, nullptr);
+        kill_target_input_->value("");
+        kill_target_input_->copy_tooltip("PID / 进程名 / HWND / 标题关键字");
+        force_check_ = KCreateCheckBox(1150, 594, 54, 26, "强制");
+        force_check_->value(1);
+        force_check_->color(KThemeManager::instance().theme().panelBg);
+        force_check_->selection_color(KThemeManager::instance().theme().primary);
+        auto* kill = KCreateButton(1210, 592, 78, 30, "结束进程", KBUTTON_LIGHT);
+        kill->callback(KillThunk, this);
+        auto* close_app = KCreateButton(1298, 592, 80, 30, "关应用", KBUTTON_LIGHT);
+        close_app->callback(CloseAppThunk, this);
         list_card->end();
 
-        auto* log_card = KCreateCard(936, 652, 468, 146, nullptr);
+        auto* exec_card = KCreateCard(936, 668, 468, 142, nullptr);
+        exec_card->setTitle("远程打开 / 运行");
+        exec_card->setSubtitle("打开=ShellExecute cmdId 0x18；运行=CreateProcess cmdId 0x0F");
+        exec_card->begin();
+        remote_path_input_ = new CopyableTextBox(956, 720, 254, 30, nullptr);
+        remote_path_input_->value("https://example.com");
+        remote_args_input_ = new CopyableTextBox(1218, 720, 92, 30, nullptr);
+        remote_args_input_->value("");
+        remote_show_input_ = new CopyableTextBox(1318, 720, 38, 30, nullptr);
+        remote_show_input_->value("0");
+        auto* open_url = KCreateButton(956, 764, 92, 30, "打开", KBUTTON_LIGHT);
+        open_url->callback(OpenUrlThunk, this);
+        auto* run_program = KCreateButton(1058, 764, 92, 30, "运行", KBUTTON_HEAVY);
+        run_program->callback(RunProgramThunk, this);
+        auto* exec_hint = createLabel(1160, 768, 218, 22, "参数在中框；show:0/1/2", true);
+        exec_hint->labelsize(12);
+        exec_card->end();
+
+        auto* log_card = KCreateCard(936, 824, 468, 116, nullptr);
         log_card->setTitle("运行日志");
         log_card->setSubtitle("右键复制；错误会保留在这里，不再直接崩溃");
         log_card->begin();
-        log_display_ = new CopyableTextDisplay(956, 704, 428, 70, nullptr);
+        log_display_ = new CopyableTextDisplay(956, 874, 428, 54, nullptr);
         log_display_->set_text("");
         log_card->end();
 
-        status_bar_ = KCreateStatusBar(16, 820, 1388, 24, "就绪");
+        status_bar_ = KCreateStatusBar(16, 950, 1388, 24, "就绪");
         status_bar_->setRightText("Visual Studio/MSBuild x64 · Debug/Release");
 
         end();
@@ -491,6 +554,21 @@ private:
         }
     }
 
+    void onListTableEvent(KTable* table) {
+        if (!table || !kill_target_input_) return;
+        const StudentInfo* student = selectedStudent();
+        if (!student) return;
+        const int row = table->callback_row();
+        const bool show_windows = selected_list_mode_ == 2;
+        const auto& entries = show_windows ? student->windows : student->processes;
+        if (row >= 0 && row < static_cast<int>(entries.size())) {
+            const auto& entry = entries[static_cast<std::size_t>(row)];
+            const std::string value = show_windows ? hex32(entry.id) : std::to_string(entry.id);
+            kill_target_input_->value(value.c_str());
+            kill_target_input_->redraw();
+        }
+    }
+
     std::string selectedIpOrWarn() {
         if (selected_ip_.empty()) {
             KShowMessage("未选择学生", "请先在学生表中选择一个学生。\n如果表为空，请先启动服务并等待学生登录。 ");
@@ -513,16 +591,16 @@ private:
         const auto ip = selectedIpOrWarn();
         if (ip.empty()) return;
         if (report_type == 1 || report_type == 2) {
-            selected_list_mode_ = static_cast<int>(report_type);
+            selected_list_mode_ = report_type == 1 ? 2 : 1;
             refreshListTable();
         }
         service_.requestInfo(ip, report_type);
         if (report_type == 0) {
             appendLog("INFO", "已请求学生完整信息：" + ip, ip);
         } else if (report_type == 1) {
-            appendLog("INFO", "已请求学生进程列表：" + ip, ip);
-        } else {
             appendLog("INFO", "已请求学生窗口列表：" + ip, ip);
+        } else {
+            appendLog("INFO", "已请求学生进程列表：" + ip, ip);
         }
     }
 
@@ -574,6 +652,113 @@ private:
         const bool force = *delay == 0;
         service_.sendShutdown(ip, reboot, *delay, force, text);
         appendLog("INFO", std::string("已发送") + (reboot ? "重启" : "关机") + "命令：" + ip, ip);
+    }
+
+    bool forceSelected() const {
+        return !force_check_ || force_check_->value() != 0;
+    }
+
+    std::string targetTextOrWarn(const char* usage) {
+        const char* raw = kill_target_input_ ? kill_target_input_->value() : "";
+        std::string target = trim(raw ? raw : "");
+        if (target.empty()) {
+            KShowMessage("目标为空", usage);
+        }
+        return target;
+    }
+
+    void onKillProcess() {
+        const auto ip = selectedIpOrWarn();
+        if (ip.empty()) return;
+        const StudentInfo* student = selectedStudent();
+        if (!student) return;
+        const std::string target = targetTextOrWarn("请输入 PID 或进程名；也可以先点击进程列表中的某一行自动填入 PID。");
+        if (target.empty()) return;
+        const bool force = forceSelected();
+        if (auto pid = parseUint32Flexible(target)) {
+            service_.sendKillProcess(ip, *pid, force);
+            return;
+        }
+
+        std::vector<StudentListEntry> matches;
+        const std::string folded_target = lowerAscii(target);
+        for (const auto& process : student->processes) {
+            if (lowerAscii(process.name) == folded_target) {
+                matches.push_back(process);
+            }
+        }
+        if (matches.empty()) {
+            for (const auto& process : student->processes) {
+                if (containsFoldedAscii(process.name, target)) {
+                    matches.push_back(process);
+                }
+            }
+        }
+        if (matches.empty()) {
+            KShowMessage("未找到进程", "当前进程列表里没有匹配项。请先点击“进程”刷新，再输入 PID 或进程名。");
+            return;
+        }
+        for (const auto& process : matches) {
+            service_.sendKillProcess(ip, process.id, force);
+        }
+        appendLog("INFO", "已按名称匹配并发送结束进程命令：" + std::to_string(matches.size()) + " 项", ip);
+    }
+
+    void onCloseApplication() {
+        const auto ip = selectedIpOrWarn();
+        if (ip.empty()) return;
+        const StudentInfo* student = selectedStudent();
+        if (!student) return;
+        const std::string target = targetTextOrWarn("请输入 HWND 或窗口标题关键字；也可以先点击窗口列表中的某一行自动填入 HWND。");
+        if (target.empty()) return;
+        const bool force = forceSelected();
+        if (auto hwnd = parseUint32Flexible(target)) {
+            service_.sendCloseApplication(ip, *hwnd, force);
+            return;
+        }
+
+        auto it = std::find_if(student->windows.begin(), student->windows.end(), [&](const StudentListEntry& window) {
+            return containsFoldedAscii(window.name, target);
+        });
+        if (it == student->windows.end()) {
+            KShowMessage("未找到窗口", "当前窗口列表里没有匹配项。请先点击“窗口”刷新，再输入 HWND 或标题关键字。");
+            return;
+        }
+        service_.sendCloseApplication(ip, it->id, force);
+        appendLog("INFO", "已按标题匹配并发送关闭应用命令：" + hex32(it->id) + " " + it->name, ip);
+    }
+
+    void onOpenUrl() {
+        const auto ip = selectedIpOrWarn();
+        if (ip.empty()) return;
+        const char* raw = remote_path_input_ ? remote_path_input_->value() : "";
+        const std::string target = trim(raw ? raw : "");
+        if (target.empty()) {
+            KShowMessage("打开目标为空", "请输入要在学生机打开的网址或文件路径。");
+            return;
+        }
+        service_.sendOpenUrl(ip, target);
+        appendLog("INFO", "已发送打开网页/文件命令：" + target, ip);
+    }
+
+    void onRunProgram() {
+        const auto ip = selectedIpOrWarn();
+        if (ip.empty()) return;
+        const char* raw_path = remote_path_input_ ? remote_path_input_->value() : "";
+        const std::string path = trim(raw_path ? raw_path : "");
+        if (path.empty()) {
+            KShowMessage("程序路径为空", "请输入学生机上的程序绝对路径，例如 C:\\Windows\\notepad.exe。");
+            return;
+        }
+        const char* raw_args = remote_args_input_ ? remote_args_input_->value() : "";
+        const std::string args = raw_args ? raw_args : "";
+        const auto show = parseUint32Text(remote_show_input_ ? remote_show_input_->value() : "0");
+        if (!show || *show > 2) {
+            KShowMessage("show 参数无效", "show 只能是 0=正常、1=最小化、2=最大化。");
+            return;
+        }
+        service_.sendRunProgram(ip, path, args, *show, true);
+        appendLog("INFO", "已发送远程运行命令：\"" + path + "\" " + args, ip);
     }
 
     void pollService() {
@@ -780,11 +965,16 @@ private:
     KStatusBar* status_bar_ = nullptr;
     KTable* students_table_ = nullptr;
     KCheckBox* lock_check_ = nullptr;
+    KCheckBox* force_check_ = nullptr;
     CopyableTextBox* chat_input_ = nullptr;
     CopyableTextBox* black_text_input_ = nullptr;
     CopyableTextBox* black_color_input_ = nullptr;
     CopyableTextBox* shutdown_delay_input_ = nullptr;
     CopyableTextBox* shutdown_text_input_ = nullptr;
+    CopyableTextBox* kill_target_input_ = nullptr;
+    CopyableTextBox* remote_path_input_ = nullptr;
+    CopyableTextBox* remote_args_input_ = nullptr;
+    CopyableTextBox* remote_show_input_ = nullptr;
     CopyableTextDisplay* info_display_ = nullptr;
     CopyableTextDisplay* log_display_ = nullptr;
     KImageView* preview_view_ = nullptr;

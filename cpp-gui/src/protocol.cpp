@@ -37,6 +37,28 @@ Bytes bytesFromArray(const std::uint8_t* data, std::size_t size) {
     return Bytes(data, data + size);
 }
 
+Bytes utf16LeNoNul(const std::string& utf8_text) {
+    Bytes out = utf16LeZ(utf8_text);
+    if (out.size() >= 2) {
+        out.resize(out.size() - 2);
+    }
+    return out;
+}
+
+void appendFixedUtf16LeField(Bytes& out, const std::string& text, std::size_t field_bytes, std::size_t max_text_bytes) {
+    Bytes raw = utf16LeNoNul(text);
+    if (raw.size() > max_text_bytes) {
+        raw.resize(max_text_bytes);
+    }
+    if (raw.size() % 2 != 0) {
+        raw.pop_back();
+    }
+    appendBytes(out, raw);
+    if (raw.size() < field_bytes) {
+        out.insert(out.end(), field_bytes - raw.size(), 0);
+    }
+}
+
 Bytes withPacketHeader(std::uint32_t magic, std::uint32_t version, std::uint32_t length, const std::uint8_t* guid, const Bytes& payload) {
     Bytes out;
     appendLe32(out, magic);
@@ -310,6 +332,28 @@ Bytes buildInfoRequestMessage(const std::string& student_ip, std::uint32_t repor
     return out;
 }
 
+Bytes buildKillMessage(const std::string& student_ip, std::uint32_t pid, std::uint32_t hwnd, bool force) {
+    const std::uint32_t report_type = pid != 0 ? 4 : 3;
+    Bytes payload;
+    // Python-compatible: first length field is 24 even though the wire payload
+    // carries seven DWORDs. Student sub_445670 reads type/hwnd/pid/force from it.
+    appendLe32(payload, 24);
+    appendLe32(payload, 0x100000);
+    appendLe32(payload, 0);
+    appendLe32(payload, report_type);
+    appendLe32(payload, hwnd);
+    appendLe32(payload, pid);
+    appendLe32(payload, force ? 1 : 0);
+
+    Bytes out;
+    appendLe32(out, kMess);
+    appendLe32(out, 1);
+    appendLe32(out, 1);
+    appendBytes(out, ipv4Bytes(student_ip));
+    appendBytes(out, payload);
+    return out;
+}
+
 Bytes buildComdCommandEx(std::uint32_t cmd_code, const Bytes& payload, const Bytes& guid, const Bytes& extra_header, std::uint32_t command_id) {
     Bytes inner;
     appendLe32(inner, cmd_code);
@@ -359,6 +403,30 @@ Bytes buildShutdownCommand(bool reboot, std::uint32_t delay_seconds, bool force,
     // The student receiver copies from body+0x0C using the packet length and
     // consumes four bytes past the logical payload; this mirrors the Python
     // implementation and keeps the optional text terminator intact.
+    payload.insert(payload.end(), 4, 0);
+    return buildComdCommandEx(0x80000010, payload, bytesFromArray(kTeacherGuidComd, 16), {}, command_id);
+}
+
+Bytes buildOpenUrlCommand(const std::string& url, std::uint32_t command_id) {
+    Bytes payload;
+    appendLe32(payload, 0x200);
+    appendLe32(payload, 0);
+    appendLe32(payload, 0x18);
+    appendLe32(payload, 0);
+    appendBytes(payload, utf16LeZ(url));
+    payload.insert(payload.end(), 4, 0);
+    return buildComdCommandEx(0x80000010, payload, bytesFromArray(kTeacherGuidComd, 16), {}, command_id);
+}
+
+Bytes buildRunProgramCommand(const std::string& path, const std::string& args, std::uint32_t show_mode, bool fallback, std::uint32_t command_id) {
+    Bytes payload;
+    appendLe32(payload, 0x200);
+    appendLe32(payload, 0);
+    appendLe32(payload, 0x0F);
+    appendLe32(payload, fallback ? 1 : 0);
+    appendFixedUtf16LeField(payload, path, 512, 510);
+    appendFixedUtf16LeField(payload, args, 320, 318);
+    appendLe32(payload, show_mode);
     payload.insert(payload.end(), 4, 0);
     return buildComdCommandEx(0x80000010, payload, bytesFromArray(kTeacherGuidComd, 16), {}, command_id);
 }

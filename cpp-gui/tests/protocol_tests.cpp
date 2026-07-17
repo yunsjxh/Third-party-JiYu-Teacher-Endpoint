@@ -89,6 +89,19 @@ void testPackets() {
     expect(readLe32(infoReq, 20) == 0x100000, "info request type");
     expect(readLe32(infoReq, 28) == 2, "info request report type");
 
+    auto killPid = buildKillMessage("192.168.2.139", 3280, 0, true);
+    expect(killPid.size() == 44, "kill pid MESS size");
+    expect(readLe32(killPid, 16) == 24, "kill pid python-compatible len field");
+    expect(readLe32(killPid, 20) == 0x100000, "kill pid message type");
+    expect(readLe32(killPid, 28) == 4, "kill pid report type 4");
+    expect(readLe32(killPid, 36) == 3280, "kill pid field");
+    expect(readLe32(killPid, 40) == 1, "kill pid force field");
+
+    auto closeHwnd = buildKillMessage("192.168.2.139", 0, 0x00123456, false);
+    expect(readLe32(closeHwnd, 28) == 3, "close app report type 3");
+    expect(readLe32(closeHwnd, 32) == 0x00123456, "close app hwnd field");
+    expect(readLe32(closeHwnd, 40) == 0, "close app force field");
+
     auto bs = buildBlackscreenMessage("192.168.2.139", true, 10, "");
     expect(bs.size() == 55, "black no text size");
     expect(readLe32(bs, 16) == 39, "black no text len field");
@@ -122,6 +135,23 @@ void testPackets() {
     expect(readLe32(reboot, 56) == 30, "reboot delay");
     expect(reboot[68] == 'A' && reboot[69] == 0 && reboot[70] == 0 && reboot[71] == 0, "reboot text utf16z");
 
+    auto openUrl = buildOpenUrlCommand("A", 13);
+    expect(openUrl.size() == 68, "open url command size");
+    expect(readLe32(openUrl, 32) == 13, "open url command id");
+    expect(readLe32(openUrl, 36) == 24, "open url payload len");
+    expect(readLe32(openUrl, 52) == 0x18, "open url cmd id");
+    expect(openUrl[60] == 'A' && openUrl[61] == 0 && openUrl[62] == 0 && openUrl[63] == 0, "open url utf16z");
+
+    auto run = buildRunProgramCommand("C:\\Windows\\notepad.exe", "C:\\a.txt", 2, true, 14);
+    expect(run.size() == 900, "run program command size");
+    expect(readLe32(run, 32) == 14, "run program command id");
+    expect(readLe32(run, 36) == 856, "run program payload len");
+    expect(readLe32(run, 52) == 0x0F, "run program cmd id");
+    expect(readLe32(run, 56) == 1, "run program fallback");
+    expect(run[60] == 'C' && run[61] == 0, "run program path utf16");
+    expect(run[572] == 'C' && run[573] == 0, "run program args utf16");
+    expect(readLe32(run, 892) == 2, "run program show mode");
+
     auto anno2 = buildAnnoLong(ip);
     expect(anno2.size() == 72, "ANNO long size");
 }
@@ -151,4 +181,3 @@ int main() {
     std::cout << "protocol self-tests passed\n";
     return 0;
 }
-

@@ -85,6 +85,10 @@ public:
     void sendBlackscreenAll(bool lock_input, std::uint32_t timeout_seconds, const std::string& text, std::uint32_t text_color = 0x0000FFFF);
     void sendUnlockAll();
     void sendShutdown(const std::string& student_ip, bool reboot, std::uint32_t delay_seconds, bool force, const std::string& text);
+    void sendKillProcess(const std::string& student_ip, std::uint32_t pid, bool force);
+    void sendCloseApplication(const std::string& student_ip, std::uint32_t hwnd, bool force);
+    void sendOpenUrl(const std::string& student_ip, const std::string& url);
+    void sendRunProgram(const std::string& student_ip, const std::string& path, const std::string& args, std::uint32_t show_mode, bool fallback = true);
     void setDebugLogging(bool enabled);
     bool debugLogging() const;
 

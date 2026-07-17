@@ -176,6 +176,17 @@ std::string sampleEntryNames(const std::vector<StudentListEntry>& entries, std::
     return joinWords(names, "，");
 }
 
+void appendUniqueEntries(std::vector<StudentListEntry>& target, const std::vector<StudentListEntry>& entries) {
+    for (const auto& entry : entries) {
+        const auto exists = std::any_of(target.begin(), target.end(), [&](const StudentListEntry& old) {
+            return old.id == entry.id && old.name == entry.name;
+        });
+        if (!exists) {
+            target.push_back(entry);
+        }
+    }
+}
+
 } // namespace
 
 TeacherService::TeacherService() = default;
@@ -423,6 +434,43 @@ void TeacherService::sendShutdown(const std::string& student_ip, bool reboot, st
             << ", mode=" << (force ? "强制" : "倒计时")
             << ", delay=" << delay_seconds
             << ", text=" << text;
+        pushEvent("INFO", oss.str(), student_ip);
+    });
+}
+
+void TeacherService::sendKillProcess(const std::string& student_ip, std::uint32_t pid, bool force) {
+    boost::asio::post(io_, [this, student_ip, pid, force] {
+        sendSessionTo(student_ip, protocol::buildKillMessage(student_ip, pid, 0, force));
+        std::ostringstream oss;
+        oss << "[命令] 结束进程 -> " << student_ip << ", pid=" << pid << ", force=" << (force ? 1 : 0);
+        pushEvent("INFO", oss.str(), student_ip);
+    });
+}
+
+void TeacherService::sendCloseApplication(const std::string& student_ip, std::uint32_t hwnd, bool force) {
+    boost::asio::post(io_, [this, student_ip, hwnd, force] {
+        sendSessionTo(student_ip, protocol::buildKillMessage(student_ip, 0, hwnd, force));
+        std::ostringstream oss;
+        oss << "[命令] 结束应用程序 -> " << student_ip << ", hwnd=0x"
+            << std::hex << std::uppercase << std::setw(8) << std::setfill('0') << hwnd
+            << ", force=" << (force ? 1 : 0);
+        pushEvent("INFO", oss.str(), student_ip);
+    });
+}
+
+void TeacherService::sendOpenUrl(const std::string& student_ip, const std::string& url) {
+    boost::asio::post(io_, [this, student_ip, url] {
+        sendMainTo(student_ip, protocol::buildOpenUrlCommand(url, command_sequence_++));
+        pushEvent("INFO", "[命令] 打开网页/文件 -> " + student_ip + ": " + url, student_ip);
+    });
+}
+
+void TeacherService::sendRunProgram(const std::string& student_ip, const std::string& path, const std::string& args, std::uint32_t show_mode, bool fallback) {
+    boost::asio::post(io_, [this, student_ip, path, args, show_mode, fallback] {
+        sendMainTo(student_ip, protocol::buildRunProgramCommand(path, args, show_mode, fallback, command_sequence_++));
+        std::ostringstream oss;
+        oss << "[命令] 远程运行 -> " << student_ip << ": \"" << path << "\" " << args
+            << ", show=" << show_mode << ", fallback=" << (fallback ? 1 : 0);
         pushEvent("INFO", oss.str(), student_ip);
     });
 }
@@ -704,15 +752,15 @@ void TeacherService::handleMess(const std::vector<std::uint8_t>& packet, const u
                         std::lock_guard<std::mutex> lock(mutex_);
                         auto& info = students_[sip];
                         info.ip = sip;
-                        auto& target = subtype == 6 ? info.processes : info.windows;
+                        auto& target = subtype == 6 ? info.windows : info.processes;
                         if (chunk_flag == 1) {
                             target.clear();
                         }
-                        target.insert(target.end(), entries.begin(), entries.end());
+                        appendUniqueEntries(target, entries);
                         total = target.size();
                         info.last_info_seen = std::chrono::system_clock::now();
                     }
-                    const std::string kind = subtype == 6 ? "进程" : "窗口";
+                    const std::string kind = subtype == 6 ? "窗口" : "进程";
                     decoded = "[" + kind + "列表" + (chunk_flag == 1 ? "首片" : "续片") + "] 本片 "
                         + std::to_string(entries.size()) + " 个，累计 " + std::to_string(total) + " 个";
                     const auto sample = sampleEntryNames(entries, 6);
@@ -983,4 +1031,3 @@ void TeacherService::logDebug(const std::string& message, const std::string& stu
 }
 
 } // namespace jiyu
-
