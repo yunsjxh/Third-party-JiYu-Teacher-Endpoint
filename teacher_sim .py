@@ -134,6 +134,7 @@ ROUTINE_MAGICS = {0x434E4F4F, 0x434E4143, 0x4F4E4E41}
 
 students = {}
 previews = {}   # sip -> {'total':int, 'buf':bytearray, 'got':int}
+last_status = {}  # (sip, key) -> 最近一条同类消息内容（重复降为 DEBUG，防止刷屏）
 running = True
 
 
@@ -258,6 +259,84 @@ def send_chat(sip, text):
     except Exception as e:
         logger.error('[命令] 发送聊天消息失败：%s', e, exc_info=True)
         print(f'[命令] 发送失败：{e}')
+
+
+def request_info(sip, rtype=0):
+    """请求学生上报信息（MESS，payload type=0x100000）。
+
+    rtype（学生端 sub_445670 的分支条件）：
+           0=全部（type 5 系统信息 + type 6 进程列表 + type 7 窗口列表）
+           1=type 6 进程列表（分片）
+           2=type 7 窗口列表（分片）
+    学生端入口: sub_44CA70 [payload+4]==0x100000 → sub_445670。
+    """
+    if sip not in students:
+        print(f'[命令] 学生 {sip} 未登录')
+        return
+    try:
+        payload = (struct.pack('<I', 16)
+                   + struct.pack('<I', 0x100000)
+                   + struct.pack('<I', 0)
+                   + struct.pack('<I', rtype))
+        mess = (struct.pack('<II', 0x5353454D, 1)
+                + struct.pack('<I', 1)
+                + socket.inet_aton(sip)
+                + payload)
+        sock2.sendto(mess, (sip, SPORT))
+        logger.info('[Info] 信息请求 rtype=%d -> %s:%d', rtype, sip, SPORT)
+    except Exception as e:
+        logger.error('[Info] 发送信息请求失败：%s', e, exc_info=True)
+        print(f'[命令] 发送失败：{e}')
+
+
+def _parse_id_name_pairs(buf):
+    """解析 {u32 id, wchar name\0} 序列（type 6 进程列表 / type 7 窗口列表的条目）。
+
+    学生端条目格式（sub_445670）：id(4) + name(UTF-16LE) + \\x00\\x00，
+    每条 6 + 2*len(name) 字节。返回 [(id, name), ...]，容错截断。
+    """
+    entries = []
+    pos, end = 0, len(buf)
+    while pos + 6 <= end:
+        rid = struct.unpack('<I', buf[pos:pos + 4])[0]
+        chars = bytearray()
+        p = pos + 4
+        while p + 2 <= end and buf[p:p + 2] != b'\x00\x00':
+            chars += buf[p:p + 2]
+            p += 2
+        name = bytes(chars).decode('utf-16-le', errors='ignore')
+        entries.append((rid, name))
+        pos = p + 2
+    return entries
+
+
+def _parse_student_info(payload, sip):
+    """解析 type 5 学生信息结构体（自 payload 起，含 12 字节消息头）。
+
+    布局（学生端 sub_445670 填充，均为 UTF-16LE 定长字段）：
+      +0x0C  DWORD 5            +0x10  计算机名[32]   +0x50  学生ID u32
+      +0x54  MAC[6]             +0x5A  登录用户[32]   +0x9A  OS名称[32]
+      +0xDA  OS版本[64]         +0x21A CPU厂商[32]   +0x25A CPU型号[64]
+      +0x2DA 内存 "xxxx MB"[16]
+    """
+    def wstr(off, maxlen):
+        raw = payload[off:off + maxlen * 2]
+        return raw.decode('utf-16-le', errors='ignore').split('\x00')[0]
+
+    info = {
+        'name': wstr(0x10, 32),
+        'stu_id': struct.unpack('<I', payload[0x50:0x54])[0],
+        'mac': '-'.join(f'{b:02X}' for b in payload[0x54:0x5A]),
+        'user': wstr(0x5A, 32),
+        'os': wstr(0x9A, 32),
+        'osver': wstr(0xDA, 64),
+        'cpu_vendor': wstr(0x21A, 32),
+        'cpu_model': wstr(0x25A, 64),
+        'mem': wstr(0x2DA, 16),
+    }
+    if sip in students:
+        students[sip]['info'] = info
+    return info
 
 
 def build_comd_command(cmd_code, payload):
@@ -453,6 +532,43 @@ def send_unlock(sip):
     print(f'[命令] 已向 {sip} 发送解锁')
 
 
+def send_shutdown(sip, reboot=False, delay=0, force=True, text=None):
+    """关机/重启学生机（COMD 0x80000010，category=0x200 → sub_44A490）。
+
+    cmdId: 0x14=关机，0x13=重启，|0x10000000=强制（跳过学生端倒计时气泡）。
+    delay>0 且非 force 时，学生端弹倒计时气泡（(delay+1)*1000ms，文本取 text）。
+    执行端为学生端目录下 Shutdown.exe：关机=-nb，重启=-b，force=-f/-nf，
+    执行后学生端进程自杀退出。
+
+    注意：payload 末尾必须多补 4 字节——学生端按包内 len 从 body+0xC 复制，
+    会从 reserved 字段开始算，吃掉 payload 尾部 4 字节。
+    """
+    if sip not in students:
+        print(f'[命令] 学生 {sip} 未登录')
+        return
+    cmd = (0x13 if reboot else 0x14) | (0x10000000 if force else 0)
+    payload = struct.pack('<I', 0x200)                # category: 应用命令
+    payload += struct.pack('<I', 0)                   # flags
+    payload += struct.pack('<I', cmd)                 # cmdId
+    payload += struct.pack('<I', delay)               # 延迟秒数
+    payload += b'\x00' * 8                            # reserved
+    if text:
+        payload += text.encode('utf-16-le') + b'\x00\x00'
+    payload += b'\x00' * 4                            # 吸收接收端 len 截断
+    pkt = build_comd_command_ex(0x80000010, payload,
+                                'f96a6d195b2946b9ab958a143ecddc26')
+    action = '重启' if reboot else '关机'
+    try:
+        sock.sendto(pkt, (sip, PORT))
+        mode = '强制立即' if force else (f'倒计时{delay}秒' if delay > 0 else '立即')
+        logger.info('[命令] %s -> %s, cmd=0x%08X, delay=%d, text=%s',
+                    action, sip, cmd, delay, text)
+        print(f'[命令] 已向 {sip} 发送{mode}{action}')
+    except Exception as e:
+        logger.error('[命令] 发送%s失败：%s', action, e, exc_info=True)
+        print(f'[命令] 发送失败：{e}')
+
+
 
 
 def build_dmoc():
@@ -592,11 +708,16 @@ def handle_mess(d, sip, sp, via='unknown'):
 
     text = None
     msg_kind = 'unknown'
+    # 去重键：区分消息类别/子类型，避免交替消息绕过相邻去重
+    dedupe_key = None
     msg_type = struct.unpack('<I', payload[4:8])[0] if len(payload) >= 8 else 0
+    category = struct.unpack('<I', payload[8:12])[0] if len(payload) >= 12 else 0
+    subtype = struct.unpack('<I', payload[12:16])[0] if len(payload) >= 16 else 0
 
     # IDA 中聊天消息负载结构：
     # [0..3]=总长, [4..7]=0x800, [8..11]=0, [12..15]=1, [16..]=UTF-16-LE 字符串
     if len(payload) >= 16 and msg_type == 0x800:
+        dedupe_key = 'chat'
         try:
             raw = payload[16:].rstrip(b'\x00')
             if len(raw) % 2:
@@ -606,48 +727,91 @@ def handle_mess(d, sip, sp, via='unknown'):
         except Exception as e:
             logger.debug('[MESS] 聊天消息 UTF-16-LE 解码失败：%s', e)
 
-    # 状态/窗口标题等（payload[4:8]==0，payload[8:12]==0x03000000）
-    # IDA 中结构：
-    # [0..3]=总长, [4..7]=0, [8..11]=3, [12..15]=子类型,
-    # [16..19]=字符串最大长度, [20..23]=PID/计数/额外数据, [24..]=UTF-16-LE 字符串
     elif len(payload) >= 24 and msg_type == 0:
-        subtype = struct.unpack('<I', payload[12:16])[0]
+        dedupe_key = f'{category:#010x}/{subtype}'
         extra = struct.unpack('<I', payload[20:24])[0]
-        if subtype == 6:
-            try:
-                raw = payload[24:].rstrip(b'\x00')
-                if len(raw) % 2:
-                    raw = raw[:-1]
-                title = raw.decode('utf-16-le')
-                text = f'[窗口标题] {title}'
+        if category == 0x800000:
+            # 信息上报（request_info 0x100000 的回复）：
+            # [12..15]: 5=系统信息 6=进程列表(分片) 7=窗口列表(分片)
+            if subtype == 5:
+                if len(payload) >= 0x2E0:
+                    try:
+                        info = _parse_student_info(payload, sip)
+                        text = (f"[学生信息] 计算机名={info['name']} 用户={info['user']} "
+                                f"MAC={info['mac']} OS={info['os']} {info['osver']} "
+                                f"CPU={info['cpu_vendor']}/{info['cpu_model']} 内存={info['mem']}")
+                        msg_kind = 'status'
+                    except Exception as e:
+                        logger.debug('[MESS] 学生信息解析失败：%s', e)
+                else:
+                    logger.debug('[MESS] type 5 学生信息长度不足: %d', len(payload))
+            elif subtype in (6, 7):
+                # [16..19]=分片标志(1=首片), [20..]={u32 id, wchar name\0} 序列
+                chunk_flag = struct.unpack('<I', payload[16:20])[0]
+                entries = _parse_id_name_pairs(payload[20:])
+                store_key = 'processes' if subtype == 6 else 'windows'
+                if sip in students:
+                    if chunk_flag == 1 or store_key not in students[sip]:
+                        students[sip][store_key] = []
+                    students[sip][store_key].extend(entries)
+                total = len(students[sip][store_key]) if sip in students and store_key in students[sip] else len(entries)
+                kind = '进程' if subtype == 6 else '窗口'
+                names = '，'.join(n for _, n in entries[:6])
+                text = (f'[{kind}列表{"首片" if chunk_flag == 1 else "续片"}] '
+                        f'本片 {len(entries)} 个，累计 {total} 个：{names}'
+                        + ('…' if len(entries) > 6 else ''))
                 msg_kind = 'status'
-            except Exception as e:
-                logger.debug('[MESS] 窗口标题解码失败：%s', e)
-        elif subtype == 7:
-            # sub_43B080：调用 Wlanapi 获取可用 WiFi 网络数量，-1 表示检测失败
-            count = extra if extra != 0xFFFFFFFF else -1
-            text = f'[WiFi可用网络数量] {count}'
-            msg_kind = 'status'
-        elif subtype == 1:
-            text = f'[IE/浏览器URL信息] extra=0x{extra:08X}'
-            msg_kind = 'status'
-        elif subtype == 0:
-            text = f'[窗口标题清空/PID=0x{extra:08X}]'
-            msg_kind = 'status'
-        elif subtype == 3:
-            text = '[系统性能/进程信息]'
-            msg_kind = 'status'
+                logger.debug('[MESS] %s列表完整分片: %s', kind,
+                             '，'.join(f'{p}:{n}' for p, n in entries))
+            else:
+                logger.debug('[MESS] 未知信息上报子类型 %d', subtype)
         else:
-            logger.debug('[MESS] 未知状态子类型 %d', subtype)
+            # 状态消息（category=3 等）：
+            # [12..15]=子类型, [16..19]=字符串最大长度, [20..23]=PID/计数/额外数据, [24..]=UTF-16-LE 字符串
+            if subtype == 6:
+                try:
+                    raw = payload[24:].rstrip(b'\x00')
+                    if len(raw) % 2:
+                        raw = raw[:-1]
+                    title = raw.decode('utf-16-le')
+                    text = f'[窗口标题] {title}'
+                    msg_kind = 'status'
+                except Exception as e:
+                    logger.debug('[MESS] 窗口标题解码失败：%s', e)
+            elif subtype == 7:
+                # sub_43B080：调用 Wlanapi 获取可用 WiFi 网络数量，-1 表示检测失败
+                count = extra if extra != 0xFFFFFFFF else -1
+                text = f'[WiFi可用网络数量] {count}'
+                msg_kind = 'status'
+            elif subtype == 1:
+                text = f'[IE/浏览器URL信息] extra=0x{extra:08X}'
+                msg_kind = 'status'
+            elif subtype == 0:
+                text = f'[窗口标题清空/PID=0x{extra:08X}]'
+                msg_kind = 'status'
+            elif subtype == 3:
+                text = '[系统性能/进程信息]'
+                msg_kind = 'status'
+            else:
+                logger.debug('[MESS] 未知状态子类型 %d (category=%#x)', subtype, category)
 
     if text:
         if msg_kind == 'chat':
             logger.info('[MESS] 来自 %s:%d 的聊天消息：%s', sip, sp, text)
+        elif last_status.get((sip, dedupe_key)) == text:
+            # 内容无变化的同类消息（周期性窗口标题/WiFi/列表分片）只记 DEBUG
+            logger.debug('[MESS] 来自 %s:%d 的状态消息(重复)：%s', sip, sp, text)
         else:
+            last_status[(sip, dedupe_key)] = text
             logger.info('[MESS] 来自 %s:%d 的状态消息：%s', sip, sp, text)
     else:
-        logger.info('[MESS] 来自 %s:%d 的消息无法解析文本，payload_len=%d, msg_type=0x%08X',
-                    sip, sp, len(payload), msg_type)
+        key = f'<未解析 type=0x{msg_type:08X} len={len(payload)}>'
+        if last_status.get((sip, key)) == payload[:64]:
+            logger.debug('[MESS] 来自 %s:%d 的消息无法解析文本(重复)', sip, sp)
+        else:
+            last_status[(sip, key)] = payload[:64]
+            logger.info('[MESS] 来自 %s:%d 的消息无法解析文本，payload_len=%d, msg_type=0x%08X',
+                        sip, sp, len(payload), msg_type)
 
 
 def broadcast():
@@ -714,8 +878,12 @@ def session_recv():
             mag = struct.unpack('<I', d[:4])[0]
 
             if mag == 0x49474F4C:  # LOGI
-                logger.info('[SessionRecv] LOGI from %s:%d', sip, sp)
                 already_logged_in = sip in students
+                # 已登录学生会周期性重发 LOGI（相当于心跳），属常态——
+                # 回复包照发，但日志降为 DEBUG，避免每次心跳刷 4 条 INFO。
+                log = logger.debug if already_logged_in else logger.info
+                log('[SessionRecv] LOGI from %s:%d%s', sip, sp,
+                    '（周期重复）' if already_logged_in else '')
 
                 # 1) 真实教师端第一条回复：msg_type=0x1000，总长 0x0d
                 mess1 = (struct.pack('<II', 0x5353454D, 1)
@@ -724,7 +892,7 @@ def session_recv():
                          + b'\x0d\x00\x00\x00\x00\x10\x00\x00'
                          + b'\x00\x00\x00\x00\x00\x00\x00\x00')
                 sock2.sendto(mess1, (sip, SPORT))
-                logger.info('[MESS] type 0x1000 -> %s:%d, len=%d', sip, SPORT, len(mess1))
+                log('[MESS] type 0x1000 -> %s:%d, len=%d', sip, SPORT, len(mess1))
                 time.sleep(0.05)
 
                 # 2) 真实教师端第二条回复：msg_type=0x8000，总长 0x1b
@@ -735,11 +903,10 @@ def session_recv():
                          + b'\x00\x00\x00\x00\x00\x00\x00\x00'
                          + b'\xc6\x12\x00\x00\x00\x00\xb0\x34\x00\x27\x00')
                 sock2.sendto(mess2, (sip, SPORT))
-                logger.info('[MESS] type 0x8000 -> %s:%d, len=%d', sip, SPORT, len(mess2))
+                log('[MESS] type 0x8000 -> %s:%d, len=%d', sip, SPORT, len(mess2))
                 time.sleep(0.05)
 
                 if already_logged_in:
-                    logger.info('[Login] %s 已是登录状态，不再重复启动 keepalive', sip)
                     continue
 
                 lg = bytes.fromhex('aa3a8dbe2b906645908ea29526218540')
@@ -758,6 +925,10 @@ def session_recv():
 
                 students[sip] = {'logged_in': True}
                 logger.info('[Login] %s 登录成功，students=%s', sip, list(students.keys()))
+
+                # 登录后自动请求学生信息（计算机名/MAC/用户/OS/CPU/内存）
+                time.sleep(0.2)
+                request_info(sip)
 
                 threading.Thread(target=keep_alive_preview, args=(sip,), daemon=True).start()
 
@@ -854,26 +1025,44 @@ def main_recv():
 
 # -------------------- 命令行交互 --------------------
 
-def _parse_lock_text(args):
-    """从命令行参数解析 lock 标志和 text。
+def _parse_lock_text(rest):
+    """从 bs/bsperm/bsall 的原始剩余字符串解析 lock 标志和 text。
 
-    args: [可能是 '0'/'1'（lock）, 可能是 text]
-
-    返回 (lock, text)：
-      bs <ip>              → (True, None)
-      bs <ip> 0            → (False, None)
-      bs <ip> 1            → (True, None)
-      bs <ip> 0 消息       → (False, '消息')
-      bs <ip> 消息          → (True, '消息')    —— 首个非 0/1 的参数当作 text
+    rest 为 ip 之后的整段字符串（command_loop 以 maxsplit=2 切分）：
+      '' / '0' / '1'       → 仅 lock 标志
+      '0 消息' / '1 消息'  → lock + text
+      '消息'               → lock=True + text
     """
-    lock = True
-    text = None
-    for a in args:
-        if a in ('0', '1') and text is None:
-            lock = (a == '1')
+    lock, text = True, None
+    if rest:
+        rest = rest.strip()
+        if rest in ('0', '1'):
+            lock = (rest == '1')
+        elif rest[:2] in ('0 ', '1 '):
+            lock = (rest[0] == '1')
+            text = rest[2:].strip() or None
         else:
-            text = a
+            text = rest
     return lock, text
+
+
+def _parse_delay_text(rest):
+    """解析 shutdown/reboot 的 '[倒计时秒数] [提示文字]'。
+
+      ''          → (0, None)
+      '30'        → (30, None)
+      '30 请保存'  → (30, '请保存')
+      '请保存'     → (0, '请保存')
+    """
+    delay, text = 0, None
+    if rest:
+        parts = rest.strip().split(maxsplit=1)
+        if parts[0].isdigit():
+            delay = int(parts[0])
+            text = parts[1] if len(parts) > 1 else None
+        else:
+            text = rest.strip()
+    return delay, text
 
 
 def cmd_help():
@@ -883,18 +1072,25 @@ def cmd_help():
   preview <ip>          请求指定学生的屏幕预览
   all                   请求所有学生的屏幕预览
   msg <ip> <text>       向指定学生发送聊天消息
+  info <ip> [0|1|2]     请求学生上报信息（0=全部 1=进程列表 2=窗口列表，登录后自动请求一次）
+  ps <ip>               显示学生进程列表（先 info 请求过）
+  wins <ip>             显示学生窗口列表（先 info 请求过）
   blackscreen / bs <ip> [lock=1|0] [text]   向指定学生发送黑屏安静（默认锁键鼠，10秒自动解锁）
   bsperm / bsp <ip> [lock=1|0] [text]       向指定学生发送永久黑屏安静（需手动 unlock）
   unlock <ip>           解锁指定学生的黑屏/键盘鼠标锁
   bsall [lock=1|0] [text]  对所有已登录学生发送黑屏安静
   unlock_all            对所有已登录学生发送解锁
+  shutdown / sd <ip> [秒] [text]   关闭指定学生机（不带秒数=立即强制；带秒数=倒计时提示）
+  reboot / rb <ip> [秒] [text]     重启指定学生机（参数同 shutdown）
   debug on / off        切换文件日志级别（默认 INFO，on=DEBUG 会详细记录并占空间）
   exit / quit / q       退出程序
 
   例：
     bs 192.168.2.139              黑屏 + 锁键鼠，10秒自动解
     bs 192.168.2.139 0            只黑屏不锁键鼠
-    bs 192.168.2.139 1 请认真听课  黑屏锁键鼠 + 自定义文字''')
+    bs 192.168.2.139 1 请认真听课  黑屏锁键鼠 + 自定义文字
+    shutdown 192.168.2.139        立即强制关机
+    reboot 192.168.2.139 30 请保存作业  倒计时30秒重启并显示提示文字''')
 
 
 def cmd_list():
@@ -902,8 +1098,58 @@ def cmd_list():
         print('[命令] 当前无学生登录')
         return
     print('[命令] 已登录学生：')
-    for i, sip in enumerate(students.keys(), 1):
-        print(f'  {i}. {sip}')
+    for i, (sip, st) in enumerate(students.items(), 1):
+        info = st.get('info')
+        if info:
+            print(f"  {i}. {sip}  {info['name']}  用户:{info['user']}  MAC:{info['mac']}")
+            print(f"      OS:{info['os']} {info['osver']}  CPU:{info['cpu_model']}  内存:{info['mem']}")
+        else:
+            print(f'  {i}. {sip}  (信息未获取，用 info {sip} 请求)')
+
+
+def cmd_info(args):
+    if not args:
+        print('[命令] 用法：info <学生IP> [0|1|2]  (0=系统信息 1=+进程列表 2=窗口列表)')
+        return
+    sip = args[0]
+    if sip not in students:
+        print(f'[命令] 学生 {sip} 未登录')
+        return
+    rtype = 0
+    if len(args) > 1 and args[1] in ('0', '1', '2'):
+        rtype = int(args[1])
+    request_info(sip, rtype)
+    print(f'[命令] 已向 {sip} 请求信息(rtype={rtype})，结果见日志窗口')
+
+
+def cmd_ps(args):
+    """显示已收集的进程列表（type 6）。"""
+    if not args:
+        print('[命令] 用法：ps <学生IP>')
+        return
+    sip = args[0]
+    procs = students.get(sip, {}).get('processes')
+    if not procs:
+        print(f'[命令] 无 {sip} 的进程列表（先 info {sip} 1 请求）')
+        return
+    print(f'[命令] {sip} 进程列表（{len(procs)} 个）：')
+    for pid, name in procs:
+        print(f'  {pid:>6}  {name}')
+
+
+def cmd_wins(args):
+    """显示已收集的窗口列表（type 7）。"""
+    if not args:
+        print('[命令] 用法：wins <学生IP>')
+        return
+    sip = args[0]
+    wins = students.get(sip, {}).get('windows')
+    if not wins:
+        print(f'[命令] 无 {sip} 的窗口列表（先 info {sip} 2 请求）')
+        return
+    print(f'[命令] {sip} 窗口列表（{len(wins)} 个）：')
+    for hwnd, title in wins:
+        print(f'  0x{hwnd:08X}  {title}')
 
 
 def cmd_preview(args):
@@ -968,17 +1214,23 @@ def command_loop():
                 print('[命令] 用法：msg <学生IP> <消息内容>')
             else:
                 send_chat(args[0], args[1])
+        elif cmd == 'info':
+            cmd_info(args)
+        elif cmd == 'ps':
+            cmd_ps(args)
+        elif cmd == 'wins':
+            cmd_wins(args)
         elif cmd in ('blackscreen', 'bs'):
             if len(args) < 1:
                 print('[命令] 用法：blackscreen <学生IP> [lock=1|0] [提示文字]')
             else:
-                lock, text = _parse_lock_text(args[1:])
+                lock, text = _parse_lock_text(args[1] if len(args) > 1 else '')
                 send_blackscreen(args[0], lock_input=lock, timeout=10, text=text)
         elif cmd in ('bsperm', 'bsp'):
             if len(args) < 1:
                 print('[命令] 用法：bsperm <学生IP> [lock=1|0] [提示文字]')
             else:
-                lock, text = _parse_lock_text(args[1:])
+                lock, text = _parse_lock_text(args[1] if len(args) > 1 else '')
                 send_blackscreen(args[0], lock_input=lock, timeout=0, text=text)
         elif cmd == 'unlock':
             if len(args) < 1:
@@ -989,7 +1241,7 @@ def command_loop():
             if not students:
                 print('[命令] 当前无学生登录')
             else:
-                lock, text = _parse_lock_text(args)
+                lock, text = _parse_lock_text(args[0] if args else '')
                 for sip in list(students.keys()):
                     send_blackscreen(sip, lock_input=lock, timeout=10, text=text)
                     time.sleep(0.05)
@@ -1000,6 +1252,20 @@ def command_loop():
                 for sip in list(students.keys()):
                     send_unlock(sip)
                     time.sleep(0.05)
+        elif cmd in ('shutdown', 'sd'):
+            if len(args) < 1:
+                print('[命令] 用法：shutdown <学生IP> [倒计时秒数] [提示文字]')
+            else:
+                delay, text = _parse_delay_text(args[1] if len(args) > 1 else '')
+                send_shutdown(args[0], reboot=False, delay=delay,
+                              force=(delay == 0), text=text)
+        elif cmd in ('reboot', 'rb'):
+            if len(args) < 1:
+                print('[命令] 用法：reboot <学生IP> [倒计时秒数] [提示文字]')
+            else:
+                delay, text = _parse_delay_text(args[1] if len(args) > 1 else '')
+                send_shutdown(args[0], reboot=True, delay=delay,
+                              force=(delay == 0), text=text)
         elif cmd in ('exit', 'quit', 'q'):
             break
         else:
