@@ -45,8 +45,17 @@
 ### 学生信息建档 🗂️
 - **信息请求**：登录后自动发送（也可 `info <ip>` 手动触发）MESS 信息请求（type `0x100000`）。
 - **系统信息**：计算机名称、登录用户、MAC 地址、操作系统名称/版本、CPU 厂商/型号、内存大小（IP 取 UDP 源地址）。
-- **进程列表**：type 6 分片重组，`ps <ip>` 查看。
-- **窗口列表**：type 7 分片重组，`wins <ip>` 查看。
+- **进程列表**：type 7 分片重组（pid + exe 名），`ps <ip>` 查看。
+- **窗口列表**：type 6 分片重组（hwnd + 标题），`wins <ip>` 查看。
+
+### 进程/应用管理 🛠️
+- **结束进程**：`kill <ip> <pid|进程名>`，按 pid 或已建档进程名（支持同名多进程批量），force 可选强杀/温和（type 4 → `TerminateProcess` / `WM_CLOSE`）。
+- **结束应用程序**：`closeapp <ip> <hwnd|标题关键字>`，按窗口句柄或标题关键字（type 3）。
+- **执行闭环**：`ps`/`wins` 拿目标 → `kill`/`closeapp` 执行 → `info` 刷新验证。
+
+### 远程运行/打开网页 🚀
+- **打开网页**：`openurl <ip> <网址>`，学生端 `ShellExecuteW("open")`（cmdId `0x18`）；传文件路径则按扩展名关联程序打开。
+- **远程运行**：`run <ip> <路径> [参数] [show]`，学生端 `CreateProcessW`（cmdId `0x0F`，服务态自动 `CreateProcessAsUser`），支持最小化/最大化与失败重试。
 
 ### 逐字节还原
 - 包结构参照真实教师端抓包（Line 223/283 等），保留原始 GUID、Magic、版本号与尾部字段。
@@ -122,13 +131,18 @@ COMD body:
 
 cmdId 或上 `0x10000000` = 强制执行（跳过学生端倒计时提示）。关机/重启体：`[cmdId][延迟秒数][8B 保留][UTF-16LE 提示文字]`，执行端为学生端目录下 `Shutdown.exe`（`-b`=重启、`-nb`=关机、`-f`=强制）。
 
+其他命令体：
+
+- **远程运行（`0x0F`）**：`[cmdId][fallback][路径 512B][参数 320B][showMode 4B]` → `CreateProcessW("\"path\" args")`（服务态用 `CreateProcessAsUser`）；showMode 0=正常 1=最小化 2=最大化；fallback=1 失败时按文件名在系统目录重试。
+- **打开网页（`0x18`）**：`[cmdId][保留][URL]` → `ShellExecuteW(0, "open", url, ...)`，传文件路径则按扩展名关联程序打开。
+
 ### 学生信息上报协议
 
 学生端**不会主动上报**，需教师端通过会话通道（5512）发送 MESS 信息请求：
 
 ```
 请求 payload:  [total_len=16][0x100000][flags=0][reportType]
-reportType:    0=全部(type 5+6+7)  1=进程列表  2=窗口列表  3/4=关窗口/杀进程
+reportType:    0=全部(type 5+6+7)  1=窗口列表  2=进程列表  3=结束应用程序(按hwnd)  4=结束进程(按pid)
 
 回复 payload:  [total_len][0][0x800000][type][数据...]
 type:          5=系统信息  6=进程列表(分片)  7=窗口列表(分片)
@@ -145,7 +159,7 @@ type:          5=系统信息  6=进程列表(分片)  7=窗口列表(分片)
 +0x2CE 内存大小 "xxxx MB"
 ```
 
-**type 6/7 分片**：`[type][flag(1=首片)][{u32 id, wchar name\0}...]`，每条目 6+2×len 字节（type 6 id=PID，type 7 id=HWND）；无结束标记，收到首片时重置累积。
+**type 6/7 分片**：`[type][flag(1=首片)][{u32 id, wchar name\0}...]`，每条目 6+2×len 字节（type 6 id=HWND 窗口句柄，type 7 id=PID）；无结束标记，收到首片时重置累积。
 
 ---
 
@@ -195,9 +209,13 @@ python "teacher_sim .py"
 | `preview <ip>` | 请求指定学生的屏幕预览 |
 | `all` | 请求所有学生的屏幕预览 |
 | `msg <ip> <text>` | 向指定学生发送聊天消息 |
-| `info <ip> [0\|1\|2]` | 请求学生上报信息（0=全部 1=进程列表 2=窗口列表，登录后自动请求一次） |
+| `info <ip> [0\|1\|2]` | 请求学生上报信息（0=全部 1=窗口列表 2=进程列表，登录后自动请求一次） |
 | `ps <ip>` | 显示学生进程列表（需先 info 请求） |
 | `wins <ip>` | 显示学生窗口列表（需先 info 请求） |
+| `kill <ip> <pid\|进程名> [f]` | 结束学生进程（f=1 强杀；f=0 先试 WM_CLOSE） |
+| `closeapp <ip> <hwnd\|标题关键字> [f]` | 结束学生应用程序（按窗口句柄或标题） |
+| `openurl <ip> <网址\|路径>` | 在学生机打开网页/文件（ShellExecute，cmdId=0x18） |
+| `run <ip> <路径> [参数] [show]` | 远程运行程序（cmdId=0x0F；show: 0=正常 1=最小化 2=最大化，路径含空格用引号） |
 | `blackscreen` / `bs <ip> [lock] [text]` | 黑屏安静（默认锁键鼠，10 秒自动解锁） |
 | `bsperm` / `bsp <ip> [lock] [text]` | 永久黑屏（需手动 unlock） |
 | `unlock <ip>` | 解锁指定学生的黑屏/键鼠锁 |
@@ -221,6 +239,10 @@ teacher> msg 192.168.2.139 你好         # 发聊天消息
 teacher> preview 192.168.2.139          # 请求屏幕缩略图
 teacher> info 192.168.2.139             # 请求学生信息（系统信息+进程+窗口）
 teacher> ps 192.168.2.139               # 查看学生进程列表
+teacher> kill 192.168.2.139 chrome.exe  # 按进程名强杀（可用 info 验证）
+teacher> closeapp 192.168.2.139 记事本   # 按窗口标题结束应用程序
+teacher> openurl 192.168.2.139 https://example.com  # 学生机打开网页
+teacher> run 192.168.2.139 C:\Windows\notepad.exe C:\a.txt  # 远程运行记事本
 teacher> shutdown 192.168.2.139         # 立即强制关机
 teacher> reboot 192.168.2.139 30 请保存作业  # 倒计时 30 秒重启并提示
 ```

@@ -11,6 +11,8 @@ const logMessages = [
   "[黑屏安静] -> 192.168.2.139, lock=1, timeout=10秒",
   "[AutoUnlock] 超时自动解锁 192.168.2.139",
   "[命令] 已向 192.168.2.139 发送强制立即关机",
+  "[命令] 已向 192.168.2.139 发送运行命令：notepad.exe",
+  "[命令] 已向 192.168.2.139 发送结束进程 pid=3280",
   "[MESS] [窗口标题] Program Manager",
   "[TNAL] fragment 16384/49152",
   "[Preview] fixed JPEG saved",
