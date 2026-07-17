@@ -38,6 +38,16 @@
 - **自动解锁**：教师端（模拟器）定时器到期后自动发送解锁包（MESS flags=0x90000000），无需手动操作。
 - **自定义文字**：支持黑屏时显示自定义提示文字，并可通过 COLORREF 指定文字颜色（默认黄色 `0x0000FFFF`，匹配真实教师端）。
 
+### 远程开关机 ⚡
+- **关机/重启**：通过 COMD 应用命令（cmdId `0x14`=关机、`0x13`=重启）调用学生端 `Shutdown.exe`（`-f|-nf -b|-nb`）。
+- **两种模式**：强制立即（cmdId 或上 `0x10000000`，无提示）或倒计时模式（学生端弹出倒计时气泡，可附带自定义提示文字）。
+
+### 学生信息建档 🗂️
+- **信息请求**：登录后自动发送（也可 `info <ip>` 手动触发）MESS 信息请求（type `0x100000`）。
+- **系统信息**：计算机名称、登录用户、MAC 地址、操作系统名称/版本、CPU 厂商/型号、内存大小（IP 取 UDP 源地址）。
+- **进程列表**：type 6 分片重组，`ps <ip>` 查看。
+- **窗口列表**：type 7 分片重组，`wins <ip>` 查看。
+
 ### 逐字节还原
 - 包结构参照真实教师端抓包（Line 223/283 等），保留原始 GUID、Magic、版本号与尾部字段。
 - MESS 黑屏/解锁包精确匹配教师端 `sub_54C4E0` / `sub_54C5C0` 构造逻辑。
@@ -46,7 +56,7 @@
 
 ## 关键技术发现
 
-### 黑屏命令的双路径
+### 黑屏命令的双路径之谜
 
 逆向分析发现，学生端存在**两条独立的命令处理路径**：
 
@@ -75,6 +85,67 @@ Offset  Size  Field         Value
 [36..38] 3    padding       0xA00520 (has_text=0 时)
 [36..]  var   text          UTF-16LE 文本 (has_text=1 时)
 ```
+
+### COMD/LCMD 应用命令包结构
+
+两种魔数共用同一套"应用命令"负载格式（`COMD` 带事务应答，`LCMD` 为轻量版）：
+
+```
+公共头 (0x1C 字节):
+  [0..3]   magic       0x434F4D44='COMD' / 0x4C434D44='LCMD'
+  [4..7]   version     0x00010000
+  [8..11]  bodyLen     0x0D + payloadLen
+  [12..27] GUID        事务 GUID(接收端不校验)
+COMD body:
+  [0..3]   0x4E20      事务超时 20000ms
+  [4..7]   事务id      学生端用它回 TRMC 应答
+  [8..11]  payloadLen
+  [12..]   payload
+应用命令 payload:
+  +0x00    msgId       分发器不读(任意值)
+  +0x04    category    0x200=应用命令(0x200000=VR 等)
+  +0x08    flags       高字节须为 0
+  +0x0C    body        [cmdId][参数...]
+```
+
+> **实现细节坑**：学生端按包头 len 从 body+0xC 复制负载，会吃掉 payload 尾部 4 字节——构造时末尾需多补 4 字节（本项目的 `send_shutdown`/黑屏 case 6 均已处理）。
+
+**cmdId 速查**（学生端 `sub_44A490` 分发）：
+
+| cmdId | 动作 | cmdId | 动作 |
+|-------|------|-------|------|
+| `0x13` | 重启 | `0x0F` | 远程运行程序 |
+| `0x14` | 关机 | `0x12` | 终止远程进程 |
+| `0x02` | 关闭所有程序 | `0x18` | 打开网址 |
+| `0x15` | 退出学生端 | `0x06` | 黑屏/锁键鼠 |
+| `0x05` | 修改显示名 | `0x0A/0x0B` | 锁屏开关/解锁密码 |
+
+cmdId 或上 `0x10000000` = 强制执行（跳过学生端倒计时提示）。关机/重启体：`[cmdId][延迟秒数][8B 保留][UTF-16LE 提示文字]`，执行端为学生端目录下 `Shutdown.exe`（`-b`=重启、`-nb`=关机、`-f`=强制）。
+
+### 学生信息上报协议
+
+学生端**不会主动上报**，需教师端通过会话通道（5512）发送 MESS 信息请求：
+
+```
+请求 payload:  [total_len=16][0x100000][flags=0][reportType]
+reportType:    0=全部(type 5+6+7)  1=进程列表  2=窗口列表  3/4=关窗口/杀进程
+
+回复 payload:  [total_len][0][0x800000][type][数据...]
+type:          5=系统信息  6=进程列表(分片)  7=窗口列表(分片)
+```
+
+> **解析坑**：MESS 状态消息（窗口标题/WiFi 等）的 subtype 与信息上报的 type 同位置，必须先判断 category（`payload[8:12]`）：`0x800000`=信息上报、`0x03`=周期状态，再解释 subtype，否则进程 PID 会被误读成"WiFi 数量"。
+
+**type 5 系统信息结构**（自 `payload+0x0C` 起，UTF-16LE 定长字段）：
+
+```
++0x00  u32 type=5      +0x04  计算机名称[32]   +0x44  学生ID
++0x48  MAC 地址[6]     +0x4E  登录用户[32]     +0x8E  操作系统名称[32]
++0xCE  操作系统版本    +0x20E CPU 厂商[32]    +0x24E CPU 型号[64]
++0x2CE 内存大小 "xxxx MB"
+```
+
+**type 6/7 分片**：`[type][flag(1=首片)][{u32 id, wchar name\0}...]`，每条目 6+2×len 字节（type 6 id=PID，type 7 id=HWND）；无结束标记，收到首片时重置累积。
 
 ---
 
@@ -120,15 +191,20 @@ python "teacher_sim .py"
 | 命令 | 说明 |
 |------|------|
 | `help` / `?` | 显示帮助 |
-| `list` / `ls` | 列出已登录学生 |
+| `list` / `ls` | 列出已登录学生（含已建档的计算机名/用户/MAC/OS/CPU/内存） |
 | `preview <ip>` | 请求指定学生的屏幕预览 |
 | `all` | 请求所有学生的屏幕预览 |
 | `msg <ip> <text>` | 向指定学生发送聊天消息 |
+| `info <ip> [0\|1\|2]` | 请求学生上报信息（0=全部 1=进程列表 2=窗口列表，登录后自动请求一次） |
+| `ps <ip>` | 显示学生进程列表（需先 info 请求） |
+| `wins <ip>` | 显示学生窗口列表（需先 info 请求） |
 | `blackscreen` / `bs <ip> [lock] [text]` | 黑屏安静（默认锁键鼠，10 秒自动解锁） |
 | `bsperm` / `bsp <ip> [lock] [text]` | 永久黑屏（需手动 unlock） |
 | `unlock <ip>` | 解锁指定学生的黑屏/键鼠锁 |
 | `bsall [lock] [text]` | 对所有已登录学生发送黑屏 |
 | `unlock_all` | 对所有学生解锁 |
+| `shutdown` / `sd <ip> [秒] [text]` | 关闭学生机（不带秒数=立即强制；带秒数=倒计时提示） |
+| `reboot` / `rb <ip> [秒] [text]` | 重启学生机（参数同 shutdown） |
 | `debug on` / `off` | 切换日志级别 |
 | `exit` / `quit` / `q` | 退出程序 |
 
@@ -143,6 +219,10 @@ teacher> unlock 192.168.2.139           # 手动解锁
 teacher> bsall 1 安静                   # 全员黑屏锁键鼠 + "安静"
 teacher> msg 192.168.2.139 你好         # 发聊天消息
 teacher> preview 192.168.2.139          # 请求屏幕缩略图
+teacher> info 192.168.2.139             # 请求学生信息（系统信息+进程+窗口）
+teacher> ps 192.168.2.139               # 查看学生进程列表
+teacher> shutdown 192.168.2.139         # 立即强制关机
+teacher> reboot 192.168.2.139 30 请保存作业  # 倒计时 30 秒重启并提示
 ```
 
 ---
@@ -159,10 +239,11 @@ teacher> preview 192.168.2.139          # 请求屏幕缩略图
 | `KACA` | Keep-Alive / Discovery | 学生 → 教师 | 发现/保活请求 |
 | `WACA` | Wake/Acknowledge | 教师 → 学生 | 回应 KACA |
 | `LOGI` | Login | 学生 → 教师 | 学生端登录宣告 |
-| `MESS` | Message | **双向** | 聊天消息 / 黑屏控制 / 状态上报 |
+| `MESS` | Message | **双向** | 聊天消息 / 黑屏控制 / 状态上报 / 信息上报（0x100000 请求，type 5/6/7 回复） |
 | `LPNT` | Login/Preview Notification | 教师 → 学生 | subtype=2/3 握手与就绪通知 |
 | `DMOC` | Display/Control Info | 教师 → 学生 | 显示参数与控制信息 |
-| `COMD` | Command | 教师 → 学生 | COMD 子命令（键鼠锁等，magic=0x434F4D44） |
+| `COMD` | Command | 教师 → 学生 | 应用命令（键鼠锁、关机 cmdId=0x14、重启 cmdId=0x13 等，magic=0x434F4D44） |
+| `LCMD` | Lite Command | 教师 → 学生 | 轻量应用命令（与 COMD 同构，无事务应答，magic=0x4C434D44） |
 | `TRMC` | Control Request | 学生 → 教师 | 学生端控制信息请求 |
 | `DENT` | Device Registration Done | 学生 → 教师 | 设备注册完成 |
 | `TRNT` | Thumbnail Ready | 学生 → 教师 | 学生端准备好发送缩略图 |
@@ -178,6 +259,9 @@ teacher> preview 192.168.2.139          # 请求屏幕缩略图
 .
 ├── teacher_sim .py   # 主程序
 ├── README.md         # 项目说明
+├── index.html        # 项目主页（GitHub Pages）
+├── script.js         # 主页动效脚本
+├── styles.css        # 主页样式
 ├── .gitignore        # Git 忽略规则
 └── LICENSE           # MIT 许可证
 ```

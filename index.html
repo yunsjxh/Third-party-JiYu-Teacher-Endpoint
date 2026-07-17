@@ -6,7 +6,7 @@
     <title>Third-party JiYu Teacher Endpoint</title>
     <meta
       name="description"
-      content="第三方极域教师端模拟器：基于逆向工程还原极域 V6.0 协议，支持黑屏锁屏、键鼠控制、缩略图接收与聊天消息。"
+      content="第三方极域教师端模拟器：基于逆向工程还原极域 V6.0 协议，支持黑屏锁屏、远程开关机、学生信息建档、进程/窗口列表、缩略图接收与聊天消息。"
     />
     <link rel="stylesheet" href="styles.css" />
   </head>
@@ -32,7 +32,7 @@
             <p class="eyebrow">JiYu V6.0 / UDP Protocol Lab</p>
             <h1>第三方极域教师端模拟器</h1>
             <p class="lede">
-              基于 IDA Pro 静态逆向与真实抓包复现教师端全功能通信流程：发现、登录、保活、黑屏锁屏控制、聊天消息与缩略图分片——让极域 V6.0 协议成为可观察、可研究、可验证的工程样本。
+              基于 IDA Pro 静态逆向与真实抓包复现教师端全功能通信流程：发现、登录、保活、黑屏锁屏、远程开关机、学生信息建档、聊天消息与缩略图分片——让极域 V6.0 协议成为可观察、可研究、可验证的工程样本。
             </p>
             <div class="hero-actions" aria-label="主要操作">
               <a class="button primary" href="#run">开始运行</a>
@@ -50,10 +50,11 @@
             <div class="console-lines" id="consoleLines">
               <p><span>08:33:13</span> Teacher 192.168.2.203 started</p>
               <p><span>08:33:17</span> [Login] 192.168.2.139 登录成功</p>
-              <p><span>08:33:21</span> [KACA] keep-alive -> WACA</p>
+              <p><span>08:33:18</span> [学生信息] 计算机名=DESKTOP-SCRC6OB MAC=00-0C-29-0F-AB-ED</p>
               <p><span>08:33:25</span> [黑屏安静] -> 192.168.2.139, lock=1, timeout=10秒</p>
               <p><span>08:33:35</span> [AutoUnlock] 超时自动解锁 192.168.2.139</p>
               <p><span>08:33:42</span> [Preview] preview_192_168_2_139_0_fixed.jpg</p>
+              <p><span>08:34:10</span> [命令] 已向 192.168.2.139 发送倒计时30秒重启</p>
             </div>
           </aside>
         </div>
@@ -73,7 +74,7 @@
           <span>协议目标版本</span>
         </div>
         <div>
-          <strong>12+</strong>
+          <strong>17+</strong>
           <span>交互命令</span>
         </div>
       </section>
@@ -109,13 +110,23 @@
           </article>
           <article class="feature-card">
             <span class="icon">05</span>
-            <h3>消息解析</h3>
-            <p>解析学生端聊天、窗口标题、WiFi 数量、浏览器 URL 与系统性能状态。</p>
+            <h3>信息建档</h3>
+            <p>MESS 0x100000 信息请求，解析计算机名、用户、MAC、OS、CPU、内存及进程/窗口列表。</p>
           </article>
           <article class="feature-card">
             <span class="icon">06</span>
             <h3>聊天消息</h3>
             <p>通过 MESS 协议向指定学生发送 UTF-16LE 聊天消息，学生端弹窗显示。</p>
+          </article>
+          <article class="feature-card">
+            <span class="icon">07</span>
+            <h3>远程开关机</h3>
+            <p>COMD 应用命令 cmdId 0x14/0x13 调用学生端 Shutdown.exe，支持强制立即与倒计时提示两种模式。</p>
+          </article>
+          <article class="feature-card">
+            <span class="icon">08</span>
+            <h3>消息解析</h3>
+            <p>按 category 路由解析学生端聊天、窗口标题、WiFi 数量、浏览器 URL 与系统性能状态。</p>
           </article>
         </div>
       </section>
@@ -141,15 +152,23 @@
         <div class="protocol-table" role="table" aria-label="协议包速览">
           <div role="row">
             <span role="cell">224.50.50.42:4705</span>
-            <span role="cell">控制、缩略图、COMD 子命令（键鼠锁）</span>
+            <span role="cell">控制、缩略图、COMD 应用命令（键鼠锁、开关机）</span>
           </div>
           <div role="row">
             <span role="cell">225.2.2.1:5512</span>
-            <span role="cell">登录宣告、MESS 黑屏控制、状态广播</span>
+            <span role="cell">登录宣告、MESS 黑屏控制、状态广播、信息上报</span>
           </div>
           <div role="row">
             <span role="cell">MESS type 0x20</span>
             <span role="cell">黑屏安静（flags=0x80000000 锁 / 0x90000000 解）</span>
+          </div>
+          <div role="row">
+            <span role="cell">MESS type 0x100000</span>
+            <span role="cell">信息上报请求（type 5 系统信息 / 6 进程 / 7 窗口）</span>
+          </div>
+          <div role="row">
+            <span role="cell">COMD cmdId 0x14 / 0x13</span>
+            <span role="cell">关机 / 重启（|0x10000000 强制，Shutdown.exe -f -b|-nb）</span>
           </div>
           <div role="row">
             <span role="cell">COMD subcmd 0x200</span>
@@ -177,12 +196,16 @@ python "teacher_sim .py"</code></pre>
           </div>
           <div class="command-list">
             <h3>交互命令</h3>
-            <p><code>list</code> 列出已登录学生</p>
+            <p><code>list</code> 列出已登录学生（含建档信息）</p>
             <p><code>preview &lt;ip&gt;</code> 请求屏幕缩略图</p>
             <p><code>all</code> 请求所有学生缩略图</p>
+            <p><code>info &lt;ip&gt; [0|1|2]</code> 请求学生信息（系统/进程/窗口）</p>
+            <p><code>ps / wins &lt;ip&gt;</code> 查看进程 / 窗口列表</p>
             <p><code>blackscreen / bs &lt;ip&gt;</code> 黑屏 + 锁键鼠</p>
             <p><code>unlock &lt;ip&gt;</code> 解锁黑屏与键鼠</p>
             <p><code>bsall [lock] [text]</code> 全员黑屏</p>
+            <p><code>shutdown / sd &lt;ip&gt; [秒] [文字]</code> 远程关机</p>
+            <p><code>reboot / rb &lt;ip&gt; [秒] [文字]</code> 远程重启</p>
             <p><code>msg &lt;ip&gt; &lt;text&gt;</code> 发送聊天消息</p>
           </div>
         </div>

@@ -6,9 +6,11 @@ const packets = [];
 const logMessages = [
   "[ANNO] session beacon sent",
   "[LOGI] 192.168.2.139 handshake accepted",
-  "[KACA] discovery packet -> WACA",
+  "[学生信息] 计算机名=DESKTOP-SCRC6OB 用户=测试 MAC=00-0C-29-0F-AB-ED",
+  "[进程列表首片] 本片 12 个，累计 12 个",
   "[黑屏安静] -> 192.168.2.139, lock=1, timeout=10秒",
   "[AutoUnlock] 超时自动解锁 192.168.2.139",
+  "[命令] 已向 192.168.2.139 发送强制立即关机",
   "[MESS] [窗口标题] Program Manager",
   "[TNAL] fragment 16384/49152",
   "[Preview] fixed JPEG saved",
