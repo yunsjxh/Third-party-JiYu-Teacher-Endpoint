@@ -74,7 +74,7 @@
           <span>协议目标版本</span>
         </div>
         <div>
-          <strong>17+</strong>
+          <strong>20+</strong>
           <span>交互命令</span>
         </div>
       </section>
@@ -128,6 +128,16 @@
             <h3>消息解析</h3>
             <p>按 category 路由解析学生端聊天、窗口标题、WiFi 数量、浏览器 URL 与系统性能状态。</p>
           </article>
+          <article class="feature-card">
+            <span class="icon">09</span>
+            <h3>进程管理</h3>
+            <p>type 6/7 分片重组窗口与进程列表，按 pid/名称结束进程、按句柄/标题结束应用程序。</p>
+          </article>
+          <article class="feature-card">
+            <span class="icon">10</span>
+            <h3>远程运行</h3>
+            <p>cmdId 0x0F 远程启动程序（CreateProcess），cmdId 0x18 打开网页或文件（ShellExecute）。</p>
+          </article>
         </div>
       </section>
 
@@ -164,11 +174,19 @@
           </div>
           <div role="row">
             <span role="cell">MESS type 0x100000</span>
-            <span role="cell">信息上报请求（type 5 系统信息 / 6 进程 / 7 窗口）</span>
+            <span role="cell">信息上报请求（type 5 系统信息 / 6 窗口 / 7 进程）</span>
           </div>
           <div role="row">
             <span role="cell">COMD cmdId 0x14 / 0x13</span>
             <span role="cell">关机 / 重启（|0x10000000 强制，Shutdown.exe -f -b|-nb）</span>
+          </div>
+          <div role="row">
+            <span role="cell">COMD cmdId 0x0F / 0x18</span>
+            <span role="cell">远程运行程序 / 打开网页（CreateProcess / ShellExecute）</span>
+          </div>
+          <div role="row">
+            <span role="cell">MESS type 3 / 4</span>
+            <span role="cell">结束应用程序 / 结束进程（hwnd / pid，force 强杀）</span>
           </div>
           <div role="row">
             <span role="cell">COMD subcmd 0x200</span>
@@ -201,6 +219,10 @@ python "teacher_sim .py"</code></pre>
             <p><code>all</code> 请求所有学生缩略图</p>
             <p><code>info &lt;ip&gt; [0|1|2]</code> 请求学生信息（系统/进程/窗口）</p>
             <p><code>ps / wins &lt;ip&gt;</code> 查看进程 / 窗口列表</p>
+            <p><code>kill &lt;ip&gt; &lt;pid|进程名&gt;</code> 结束学生进程</p>
+            <p><code>closeapp &lt;ip&gt; &lt;hwnd|标题&gt;</code> 结束应用程序</p>
+            <p><code>openurl &lt;ip&gt; &lt;网址&gt;</code> 学生机打开网页</p>
+            <p><code>run &lt;ip&gt; &lt;路径&gt;</code> 远程运行程序</p>
             <p><code>blackscreen / bs &lt;ip&gt;</code> 黑屏 + 锁键鼠</p>
             <p><code>unlock &lt;ip&gt;</code> 解锁黑屏与键鼠</p>
             <p><code>bsall [lock] [text]</code> 全员黑屏</p>

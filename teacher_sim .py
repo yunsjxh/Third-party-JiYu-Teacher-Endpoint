@@ -265,9 +265,9 @@ def request_info(sip, rtype=0):
     """请求学生上报信息（MESS，payload type=0x100000）。
 
     rtype（学生端 sub_445670 的分支条件）：
-           0=全部（type 5 系统信息 + type 6 进程列表 + type 7 窗口列表）
-           1=type 6 进程列表（分片）
-           2=type 7 窗口列表（分片）
+           0=全部（type 5 系统信息 + type 6 窗口列表 + type 7 进程列表）
+           1=type 6 窗口/应用程序列表（hwnd+标题，分片）
+           2=type 7 进程列表（pid+exe名，分片）
     学生端入口: sub_44CA70 [payload+4]==0x100000 → sub_445670。
     """
     if sip not in students:
@@ -289,8 +289,89 @@ def request_info(sip, rtype=0):
         print(f'[命令] 发送失败：{e}')
 
 
+def send_kill(sip, pid=None, hwnd=None, force=1):
+    """结束进程 / 结束应用程序（MESS，0x100000 通道，学生端 sub_445670 type 4/3）。
+
+    pid  → type 4（按进程结束）；hwnd → type 3（按窗口结束应用程序）。
+    force=1: TerminateProcess 强杀；force=0: 先给主窗口发 WM_CLOSE（温和结束）。
+    学生端 fire-and-forget 无确认包；杀完重新 info 刷新列表验证结果。
+    """
+    if sip not in students:
+        print(f'[命令] 学生 {sip} 未登录')
+        return
+    if pid is None and hwnd is None:
+        print('[命令] 需要 pid 或 hwnd')
+        return
+    rtype = 4 if pid is not None else 3
+    payload = (struct.pack('<I', 24) + struct.pack('<I', 0x100000)
+               + struct.pack('<I', 0) + struct.pack('<I', rtype)
+               + struct.pack('<I', hwnd or 0) + struct.pack('<I', pid or 0)
+               + struct.pack('<I', force))
+    mess = (struct.pack('<II', 0x5353454D, 1) + struct.pack('<I', 1)
+            + socket.inet_aton(sip) + payload)
+    kind = f'进程 pid={pid}' if rtype == 4 else f'应用窗口 hwnd=0x{hwnd:08X}'
+    try:
+        sock2.sendto(mess, (sip, SPORT))
+        logger.info('[命令] 结束%s -> %s, force=%d', kind, sip, force)
+        print(f'[命令] 已向 {sip} 发送结束{kind}(force={force})')
+    except Exception as e:
+        logger.error('[命令] 发送结束命令失败：%s', e, exc_info=True)
+        print(f'[命令] 发送失败：{e}')
+
+
+def send_open_url(sip, url):
+    """打开网页/文件（COMD 应用命令，cmdId 0x18，sub_44A490 case 0x18）。
+
+    学生端执行 ShellExecuteW(0, "open", url, ...)：网址走默认浏览器；
+    也可以传学生机上的文件路径，按扩展名关联程序打开（.txt/.jpg 等）。
+    """
+    if sip not in students:
+        print(f'[命令] 学生 {sip} 未登录')
+        return
+    payload = (struct.pack('<I', 0x200) + struct.pack('<I', 0)
+               + struct.pack('<I', 0x18) + struct.pack('<I', 0)
+               + url.encode('utf-16-le') + b'\x00\x00'
+               + b'\x00' * 4)
+    pkt = build_comd_command_ex(0x80000010, payload,
+                                'f96a6d195b2946b9ab958a143ecddc26')
+    try:
+        sock.sendto(pkt, (sip, PORT))
+        logger.info('[命令] 打开网页/文件 -> %s: %s', sip, url)
+        print(f'[命令] 已向 {sip} 发送打开命令：{url}')
+    except Exception as e:
+        logger.error('[命令] 发送打开命令失败：%s', e, exc_info=True)
+        print(f'[命令] 发送失败：{e}')
+
+
+def send_run_program(sip, path, args='', show=0, fallback=1):
+    """远程运行程序（COMD 应用命令，cmdId 0x0F，case 0x0F → sub_432CB0）。
+
+    学生端执行 CreateProcessW("\"path\" args")（服务态用 CreateProcessAsUser）。
+    path 必须是学生机上的绝对路径；show: 0=正常 1=最小化 2=最大化；
+    fallback=1 时启动失败会在系统目录查找同名程序重试一次。
+    """
+    if sip not in students:
+        print(f'[命令] 学生 {sip} 未登录')
+        return
+    body = struct.pack('<I', 0x0F) + struct.pack('<I', fallback)
+    body += path.encode('utf-16-le')[:510].ljust(512, b'\x00')   # a2+8  路径 256 wchar
+    body += args.encode('utf-16-le')[:318].ljust(320, b'\x00')   # a2+520 参数 160 wchar
+    body += struct.pack('<I', show)                                 # a2+840 窗口模式
+    payload = (struct.pack('<I', 0x200) + struct.pack('<I', 0)
+               + body + b'\x00' * 4)
+    pkt = build_comd_command_ex(0x80000010, payload,
+                                'f96a6d195b2946b9ab958a143ecddc26')
+    try:
+        sock.sendto(pkt, (sip, PORT))
+        logger.info('[命令] 远程运行 -> %s: "%s" %s (show=%d)', sip, path, args, show)
+        print(f'[命令] 已向 {sip} 发送运行命令："{path}" {args}')
+    except Exception as e:
+        logger.error('[命令] 发送运行命令失败：%s', e, exc_info=True)
+        print(f'[命令] 发送失败：{e}')
+
+
 def _parse_id_name_pairs(buf):
-    """解析 {u32 id, wchar name\0} 序列（type 6 进程列表 / type 7 窗口列表的条目）。
+    """解析 {u32 id, wchar name\0} 序列（type 6 窗口列表 / type 7 进程列表的条目）。
 
     学生端条目格式（sub_445670）：id(4) + name(UTF-16LE) + \\x00\\x00，
     每条 6 + 2*len(name) 字节。返回 [(id, name), ...]，容错截断。
@@ -732,7 +813,7 @@ def handle_mess(d, sip, sp, via='unknown'):
         extra = struct.unpack('<I', payload[20:24])[0]
         if category == 0x800000:
             # 信息上报（request_info 0x100000 的回复）：
-            # [12..15]: 5=系统信息 6=进程列表(分片) 7=窗口列表(分片)
+            # [12..15]: 5=系统信息 6=窗口列表(分片) 7=进程列表(分片)
             if subtype == 5:
                 if len(payload) >= 0x2E0:
                     try:
@@ -747,15 +828,22 @@ def handle_mess(d, sip, sp, via='unknown'):
                     logger.debug('[MESS] type 5 学生信息长度不足: %d', len(payload))
             elif subtype in (6, 7):
                 # [16..19]=分片标志(1=首片), [20..]={u32 id, wchar name\0} 序列
+                # type 6=窗口/应用程序列表(hwnd+标题), type 7=进程列表(pid+exe名)
                 chunk_flag = struct.unpack('<I', payload[16:20])[0]
                 entries = _parse_id_name_pairs(payload[20:])
-                store_key = 'processes' if subtype == 6 else 'windows'
+                store_key = 'windows' if subtype == 6 else 'processes'
                 if sip in students:
                     if chunk_flag == 1 or store_key not in students[sip]:
                         students[sip][store_key] = []
-                    students[sip][store_key].extend(entries)
+                    # 按 (id, name) 去重，防止首片丢失导致的重复累积
+                    existing = students[sip][store_key]
+                    seen = set(existing)
+                    for e in entries:
+                        if e not in seen:
+                            seen.add(e)
+                            existing.append(e)
                 total = len(students[sip][store_key]) if sip in students and store_key in students[sip] else len(entries)
-                kind = '进程' if subtype == 6 else '窗口'
+                kind = '窗口' if subtype == 6 else '进程'
                 names = '，'.join(n for _, n in entries[:6])
                 text = (f'[{kind}列表{"首片" if chunk_flag == 1 else "续片"}] '
                         f'本片 {len(entries)} 个，累计 {total} 个：{names}'
@@ -1072,9 +1160,13 @@ def cmd_help():
   preview <ip>          请求指定学生的屏幕预览
   all                   请求所有学生的屏幕预览
   msg <ip> <text>       向指定学生发送聊天消息
-  info <ip> [0|1|2]     请求学生上报信息（0=全部 1=进程列表 2=窗口列表，登录后自动请求一次）
+  info <ip> [0|1|2]     请求学生上报信息（0=全部 1=窗口列表 2=进程列表，登录后自动请求一次）
   ps <ip>               显示学生进程列表（先 info 请求过）
   wins <ip>             显示学生窗口列表（先 info 请求过）
+  kill <ip> <pid|进程名> [f]   结束学生进程（f=1 强杀；f=0 先试 WM_CLOSE）
+  closeapp <ip> <hwnd|标题关键字> [f]  结束学生应用程序（按窗口句柄或标题）
+  openurl <ip> <网址|路径>   在学生机打开网页/文件（ShellExecute）
+  run <ip> <路径> [参数] [show]  远程运行程序（show: 0=正常 1=最小化 2=最大化，路径含空格用引号）
   blackscreen / bs <ip> [lock=1|0] [text]   向指定学生发送黑屏安静（默认锁键鼠，10秒自动解锁）
   bsperm / bsp <ip> [lock=1|0] [text]       向指定学生发送永久黑屏安静（需手动 unlock）
   unlock <ip>           解锁指定学生的黑屏/键盘鼠标锁
@@ -1109,7 +1201,7 @@ def cmd_list():
 
 def cmd_info(args):
     if not args:
-        print('[命令] 用法：info <学生IP> [0|1|2]  (0=系统信息 1=+进程列表 2=窗口列表)')
+        print('[命令] 用法：info <学生IP> [0|1|2]  (0=全部 1=窗口列表 2=进程列表)')
         return
     sip = args[0]
     if sip not in students:
@@ -1122,15 +1214,131 @@ def cmd_info(args):
     print(f'[命令] 已向 {sip} 请求信息(rtype={rtype})，结果见日志窗口')
 
 
+def _check_student(sip, usage):
+    """校验学生已登录;第一个参数不像 IP 时提示可能漏填了 IP。"""
+    if sip in students:
+        return True
+    if '.' not in sip:
+        print(f'[命令] "{sip}" 不是有效的学生 IP——是不是漏填了 IP?用法:{usage}')
+    else:
+        print(f'[命令] 学生 {sip} 未登录')
+    return False
+
+
+def _parse_run_args(rest):
+    """解析 run 的 '<路径> [参数...] [show]'。路径含空格时用双引号包住。
+
+    show 取末尾独立的 0/1/2（0=正常 1=最小化 2=最大化），其余原样作为程序参数。
+    """
+    rest = (rest or '').strip()
+    if not rest:
+        return '', '', 0
+    if rest.startswith('"'):
+        end = rest.find('"', 1)
+        if end > 0:
+            path, rest = rest[1:end], rest[end + 1:].strip()
+        else:
+            path, rest = rest[1:], ''
+    else:
+        parts = rest.split(maxsplit=1)
+        path = parts[0]
+        rest = parts[1] if len(parts) > 1 else ''
+    show = 0
+    if rest in ('0', '1', '2'):
+        show, rest = int(rest), ''
+    elif rest.endswith((' 0', ' 1', ' 2')):
+        show, rest = int(rest[-1]), rest[:-2].rstrip()
+    return path, rest, show
+
+
+def _parse_target_force(rest):
+    """'<target> [force]' → (target, force)。force 默认 1，仅识别末尾独立的 0/1。"""
+    force = 1
+    rest = (rest or '').strip()
+    if rest.endswith(' 0'):
+        force, rest = 0, rest[:-2].strip()
+    elif rest.endswith(' 1'):
+        force, rest = 1, rest[:-2].strip()
+    return rest, force
+
+
+def cmd_kill(args):
+    """kill <ip> <pid|进程名> [force=1|0]——按 pid 或已建档进程名结束进程。"""
+    if len(args) < 2:
+        print('[命令] 用法：kill <学生IP> <pid|进程名> [force=1|0]')
+        return
+    sip = args[0]
+    if not _check_student(sip, 'kill <学生IP> <pid|进程名> [force=1|0]'):
+        return
+    target, force = _parse_target_force(args[1])
+    if not target:
+        print('[命令] 用法：kill <学生IP> <pid|进程名> [force=1|0]')
+        return
+    if target.isdigit():
+        send_kill(sip, pid=int(target), force=force)
+        return
+    # 按进程名：查已建档进程列表（info <ip> 2）
+    procs = students[sip].get('processes')
+    if not procs:
+        print(f'[命令] 无 {sip} 的进程列表，先 info {sip} 2 请求')
+        return
+    matches = [(p, n) for p, n in procs if n.lower() == target.lower()]
+    if not matches:  # 精确匹配不到再试包含匹配
+        matches = [(p, n) for p, n in procs if target.lower() in n.lower()]
+    if not matches:
+        print(f'[命令] 进程列表中找不到 "{target}"，可先 info {sip} 2 刷新')
+        return
+    for pid, name in matches:
+        send_kill(sip, pid=pid, force=force)
+        time.sleep(0.03)
+    print(f'[命令] 已对 {len(matches)} 个匹配进程发送结束命令（可用 info {sip} 2 验证）')
+
+
+def cmd_closeapp(args):
+    """closeapp <ip> <hwnd|标题关键字> [force=1|0]——按窗口结束应用程序。"""
+    if len(args) < 2:
+        print('[命令] 用法：closeapp <学生IP> <hwnd|窗口标题关键字> [force=1|0]')
+        return
+    sip = args[0]
+    if not _check_student(sip, 'closeapp <学生IP> <hwnd|窗口标题关键字> [force=1|0]'):
+        return
+    target, force = _parse_target_force(args[1])
+    if not target:
+        print('[命令] 用法：closeapp <学生IP> <hwnd|窗口标题关键字> [force=1|0]')
+        return
+    try:
+        hwnd = int(target, 0)  # 支持 0x 前缀或十进制
+        send_kill(sip, hwnd=hwnd, force=force)
+        return
+    except ValueError:
+        pass
+    # 按标题关键字：查已建档窗口列表（info <ip> 1）
+    wins = students[sip].get('windows')
+    if not wins:
+        print(f'[命令] 无 {sip} 的窗口列表，先 info {sip} 1 请求')
+        return
+    matches = [(h, t) for h, t in wins if target.lower() in t.lower()]
+    if not matches:
+        print(f'[命令] 窗口列表中找不到 "{target}"，可先 info {sip} 1 刷新')
+        return
+    if len(matches) > 1:
+        print(f'[命令] 匹配到 {len(matches)} 个窗口，取第一个：')
+        for h, t in matches[:5]:
+            print(f'    0x{h:08X}  {t}')
+    hwnd, title = matches[0]
+    print(f'[命令] 匹配窗口：0x{hwnd:08X} {title}')
+    send_kill(sip, hwnd=hwnd, force=force)
+
+
 def cmd_ps(args):
-    """显示已收集的进程列表（type 6）。"""
+    """显示已收集的进程列表（type 7，pid+exe名）。"""
     if not args:
         print('[命令] 用法：ps <学生IP>')
         return
     sip = args[0]
     procs = students.get(sip, {}).get('processes')
     if not procs:
-        print(f'[命令] 无 {sip} 的进程列表（先 info {sip} 1 请求）')
+        print(f'[命令] 无 {sip} 的进程列表（先 info {sip} 2 请求）')
         return
     print(f'[命令] {sip} 进程列表（{len(procs)} 个）：')
     for pid, name in procs:
@@ -1138,14 +1346,14 @@ def cmd_ps(args):
 
 
 def cmd_wins(args):
-    """显示已收集的窗口列表（type 7）。"""
+    """显示已收集的窗口列表（type 6，hwnd+标题）。"""
     if not args:
         print('[命令] 用法：wins <学生IP>')
         return
     sip = args[0]
     wins = students.get(sip, {}).get('windows')
     if not wins:
-        print(f'[命令] 无 {sip} 的窗口列表（先 info {sip} 2 请求）')
+        print(f'[命令] 无 {sip} 的窗口列表（先 info {sip} 1 请求）')
         return
     print(f'[命令] {sip} 窗口列表（{len(wins)} 个）：')
     for hwnd, title in wins:
@@ -1220,6 +1428,24 @@ def command_loop():
             cmd_ps(args)
         elif cmd == 'wins':
             cmd_wins(args)
+        elif cmd == 'kill':
+            cmd_kill(args)
+        elif cmd == 'closeapp':
+            cmd_closeapp(args)
+        elif cmd in ('openurl', 'open'):
+            if len(args) < 2:
+                print('[命令] 用法：openurl <学生IP> <网址|文件路径>')
+            elif _check_student(args[0], 'openurl <学生IP> <网址|文件路径>'):
+                send_open_url(args[0], args[1])
+        elif cmd == 'run':
+            if len(args) < 2:
+                print('[命令] 用法：run <学生IP> <程序路径> [参数...] [show=0|1|2]（路径含空格用双引号）')
+            elif _check_student(args[0], 'run <学生IP> <程序路径> [参数] [show]'):
+                path, pargs, show = _parse_run_args(args[1])
+                if not path:
+                    print('[命令] 用法：run <学生IP> <程序路径> [参数...] [show=0|1|2]')
+                else:
+                    send_run_program(args[0], path, pargs, show)
         elif cmd in ('blackscreen', 'bs'):
             if len(args) < 1:
                 print('[命令] 用法：blackscreen <学生IP> [lock=1|0] [提示文字]')
