@@ -17,6 +17,24 @@
 
 namespace jiyu {
 
+struct StudentSystemInfo {
+    bool valid = false;
+    std::string computer_name;
+    std::uint32_t student_id = 0;
+    std::string mac;
+    std::string login_user;
+    std::string os_name;
+    std::string os_version;
+    std::string cpu_vendor;
+    std::string cpu_model;
+    std::string memory;
+};
+
+struct StudentListEntry {
+    std::uint32_t id = 0;
+    std::string name;
+};
+
 struct StudentInfo {
     std::string ip;
     bool logged_in = false;
@@ -25,6 +43,10 @@ struct StudentInfo {
     std::string preview_status = "idle";
     std::filesystem::path raw_preview;
     std::filesystem::path fixed_preview;
+    StudentSystemInfo system_info;
+    std::vector<StudentListEntry> processes;
+    std::vector<StudentListEntry> windows;
+    std::chrono::system_clock::time_point last_info_seen{};
 };
 
 struct ServiceEvent {
@@ -55,11 +77,14 @@ public:
 
     void requestPreview(const std::string& student_ip);
     void requestPreviewAll();
+    void requestInfo(const std::string& student_ip, std::uint32_t report_type = 0);
+    void requestInfoAll(std::uint32_t report_type = 0);
     void sendChat(const std::string& student_ip, const std::string& text);
     void sendBlackscreen(const std::string& student_ip, bool lock_input, std::uint32_t timeout_seconds, const std::string& text, std::uint32_t text_color = 0x0000FFFF);
     void sendUnlock(const std::string& student_ip);
     void sendBlackscreenAll(bool lock_input, std::uint32_t timeout_seconds, const std::string& text, std::uint32_t text_color = 0x0000FFFF);
     void sendUnlockAll();
+    void sendShutdown(const std::string& student_ip, bool reboot, std::uint32_t delay_seconds, bool force, const std::string& text);
     void setDebugLogging(bool enabled);
     bool debugLogging() const;
 

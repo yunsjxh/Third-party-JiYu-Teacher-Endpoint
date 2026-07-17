@@ -23,6 +23,7 @@
 #include <exception>
 #include <filesystem>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -32,8 +33,8 @@
 namespace jiyu::gui {
 namespace {
 
-constexpr int kWinW = 1220;
-constexpr int kWinH = 760;
+constexpr int kWinW = 1420;
+constexpr int kWinH = 860;
 
 std::string formatTime(std::chrono::system_clock::time_point tp) {
     if (tp.time_since_epoch().count() == 0) {
@@ -144,6 +145,31 @@ std::optional<std::uint32_t> parseBlackTextColor(const std::string& raw) {
     return std::nullopt;
 }
 
+std::optional<std::uint32_t> parseUint32Text(const char* raw) {
+    std::string text = trim(raw ? raw : "");
+    if (text.empty()) {
+        return 0;
+    }
+    if (!std::all_of(text.begin(), text.end(), [](unsigned char ch) { return std::isdigit(ch) != 0; })) {
+        return std::nullopt;
+    }
+    try {
+        const unsigned long long value = std::stoull(text);
+        if (value > std::numeric_limits<std::uint32_t>::max()) {
+            return std::nullopt;
+        }
+        return static_cast<std::uint32_t>(value);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::string hex32(std::uint32_t value) {
+    std::ostringstream oss;
+    oss << "0x" << std::uppercase << std::hex << std::setw(8) << std::setfill('0') << value;
+    return oss.str();
+}
+
 class CleanLabel : public Fl_Box {
 public:
     CleanLabel(int x, int y, int w, int h, const char* label = nullptr, bool muted = false)
@@ -225,11 +251,16 @@ private:
     static void ThemeThunk(Fl_Widget*, void*) { KThemeManager::instance().ToggleMode(); }
     static void PreviewThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onPreviewSelected(); }
     static void PreviewAllThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onPreviewAll(); }
+    static void InfoThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onRequestInfo(0); }
+    static void ProcessThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onRequestInfo(1); }
+    static void WindowListThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onRequestInfo(2); }
     static void ChatThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onSendChat(); }
     static void BlackThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onBlack(false); }
     static void BlackPermThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onBlack(true); }
     static void UnlockThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onUnlockSelected(); }
     static void UnlockAllThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onUnlockAll(); }
+    static void ShutdownThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onShutdown(false); }
+    static void RebootThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onShutdown(true); }
     static void DebugThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onDebugToggle(); }
     static void TableThunk(Fl_Widget* widget, void* data) { static_cast<TeacherWindow*>(data)->onTableEvent(static_cast<KTable*>(widget)); }
 
@@ -239,116 +270,163 @@ private:
         resizable(this);
         begin();
 
-        auto* header = KCreatePanel(16, 14, 1188, 84, nullptr);
+        auto* header = KCreatePanel(16, 14, 1388, 84, nullptr);
         header->begin();
 
-        auto* title = createLabel(40, 28, 364, 28, "Third-party JiYu Teacher Endpoint");
+        auto* title = createLabel(40, 28, 420, 28, "Third-party JiYu Teacher Endpoint");
         title->labelfont(FL_HELVETICA_BOLD);
         title->labelsize(18);
-        auto* subtitle = createLabel(40, 58, 520, 20, "Native C++ / Boost.Asio / KswordFrame3.0 · 授权网络测试", true);
+        auto* subtitle = createLabel(40, 58, 620, 20, "Native C++ / Boost.Asio / KswordFrame3.0 · GUI-C++ 同步 main 功能", true);
+        (void)subtitle;
 
-        status_badge_ = KCreateBadge(582, 38, 84, 28, "未启动");
+        status_badge_ = KCreateBadge(672, 38, 84, 28, "未启动");
         status_badge_->setAccentColor(KThemeManager::instance().theme().danger);
 
-        student_count_badge_ = KCreateBadge(680, 38, 96, 28, "学生 0");
+        student_count_badge_ = KCreateBadge(770, 38, 96, 28, "学生 0");
         student_count_badge_->setAccentColor(KThemeManager::instance().theme().primary);
 
-        status_text_ = createLabel(792, 37, 130, 30, "本机 IP：-", true);
+        status_text_ = createLabel(884, 37, 210, 30, "本机 IP：-", true);
         status_text_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
 
-        start_button_ = KCreateButton(934, 36, 78, 34, "启动", KBUTTON_HEAVY);
+        start_button_ = KCreateButton(1110, 36, 78, 34, "启动", KBUTTON_HEAVY);
         start_button_->callback(StartThunk, this);
-        auto* theme = KCreateButton(1022, 36, 66, 34, "深/浅", KBUTTON_LIGHT);
+        auto* theme = KCreateButton(1198, 36, 66, 34, "深/浅", KBUTTON_LIGHT);
         theme->callback(ThemeThunk, this);
-        debug_button_ = KCreateButton(1098, 36, 74, 34, "DEBUG", KBUTTON_LIGHT);
+        debug_button_ = KCreateButton(1274, 36, 74, 34, "DEBUG", KBUTTON_LIGHT);
         debug_button_->callback(DebugThunk, this);
         header->end();
 
-        auto* students_card = KCreateCard(16, 112, 640, 310, nullptr);
+        auto* students_card = KCreateCard(16, 112, 760, 320, nullptr);
         students_card->setTitle("学生列表");
-        students_card->setSubtitle("自动发现 LOGI / MESS / LANT；右键表格复制单元格或整行");
+        students_card->setSubtitle("自动发现 LOGI / MESS / LANT；登录后自动请求系统信息；右键复制");
         students_card->begin();
 
-        students_table_ = new CleanTable(36, 164, 600, 236, nullptr);
-        students_table_->set_size(0, 5);
+        students_table_ = new CleanTable(36, 164, 720, 246, nullptr);
+        students_table_->set_size(0, 8);
         students_table_->set_col_header_label(0, "IP");
         students_table_->set_col_header_label(1, "登录");
-        students_table_->set_col_header_label(2, "最后包");
-        students_table_->set_col_header_label(3, "活跃");
-        students_table_->set_col_header_label(4, "预览");
-        students_table_->col_width(0, 145);
-        students_table_->col_width(1, 65);
-        students_table_->col_width(2, 105);
-        students_table_->col_width(3, 100);
-        students_table_->col_width(4, 160);
+        students_table_->set_col_header_label(2, "计算机");
+        students_table_->set_col_header_label(3, "用户");
+        students_table_->set_col_header_label(4, "MAC");
+        students_table_->set_col_header_label(5, "OS");
+        students_table_->set_col_header_label(6, "最后包");
+        students_table_->set_col_header_label(7, "活跃/预览");
+        students_table_->col_width(0, 142);
+        students_table_->col_width(1, 58);
+        students_table_->col_width(2, 120);
+        students_table_->col_width(3, 105);
+        students_table_->col_width(4, 132);
+        students_table_->col_width(5, 150);
+        students_table_->col_width(6, 82);
+        students_table_->col_width(7, 140);
         students_table_->set_builtin_copy_context_menu_enabled(true);
         students_table_->callback(TableThunk, this);
         students_card->end();
 
-        auto* action_card = KCreateCard(672, 112, 532, 310, nullptr);
+        auto* action_card = KCreateCard(792, 112, 612, 320, nullptr);
         action_card->setTitle("学生操作");
-        action_card->setSubtitle("先从左侧表格选择学生；批量命令只作用于已登录学生");
+        action_card->setSubtitle("信息请求/进程/窗口/关机重启来自远程 main；批量命令只作用于已登录学生");
         action_card->begin();
-        selected_text_ = createLabel(692, 164, 480, 26, "选中：-", true);
+        selected_text_ = createLabel(812, 164, 560, 24, "选中：-", true);
 
-        auto* preview = KCreateButton(692, 202, 110, 34, "请求预览", KBUTTON_HEAVY);
+        auto* preview = KCreateButton(812, 202, 92, 32, "预览", KBUTTON_HEAVY);
         preview->callback(PreviewThunk, this);
-        auto* preview_all = KCreateButton(812, 202, 110, 34, "请求全部", KBUTTON_LIGHT);
+        auto* preview_all = KCreateButton(912, 202, 92, 32, "全员预览", KBUTTON_LIGHT);
         preview_all->callback(PreviewAllThunk, this);
-        auto* unlock = KCreateButton(932, 202, 86, 34, "解锁", KBUTTON_LIGHT);
+        auto* info = KCreateButton(1012, 202, 76, 32, "信息", KBUTTON_LIGHT);
+        info->callback(InfoThunk, this);
+        auto* proc = KCreateButton(1096, 202, 76, 32, "进程", KBUTTON_LIGHT);
+        proc->callback(ProcessThunk, this);
+        auto* wins = KCreateButton(1180, 202, 76, 32, "窗口", KBUTTON_LIGHT);
+        wins->callback(WindowListThunk, this);
+        auto* unlock = KCreateButton(1264, 202, 70, 32, "解锁", KBUTTON_LIGHT);
         unlock->callback(UnlockThunk, this);
-        auto* unlock_all = KCreateButton(1028, 202, 110, 34, "全员解锁", KBUTTON_LIGHT);
-        unlock_all->callback(UnlockAllThunk, this);
 
-        auto* chat_label = createLabel(692, 254, 72, 22, "聊天内容", true);
+        auto* chat_label = createLabel(812, 250, 72, 22, "聊天内容", true);
         (void)chat_label;
-        chat_input_ = new CopyableTextBox(772, 246, 286, 34, nullptr);
+        chat_input_ = new CopyableTextBox(888, 242, 360, 32, nullptr);
         chat_input_->value("请认真听课");
-        auto* send_chat = KCreateButton(1070, 246, 72, 34, "发送", KBUTTON_HEAVY);
+        auto* send_chat = KCreateButton(1258, 242, 76, 32, "发送", KBUTTON_HEAVY);
         send_chat->callback(ChatThunk, this);
 
-        auto* black_text_label = createLabel(692, 296, 72, 22, "黑屏内容", true);
+        auto* black_text_label = createLabel(812, 292, 72, 22, "黑屏内容", true);
         (void)black_text_label;
-        black_text_input_ = new CopyableTextBox(772, 288, 286, 34, nullptr);
+        black_text_input_ = new CopyableTextBox(888, 284, 278, 32, nullptr);
         black_text_input_->value("请认真听课");
-        auto* color_label = createLabel(1070, 296, 38, 22, "颜色", true);
+        auto* color_label = createLabel(1178, 292, 38, 22, "颜色", true);
         (void)color_label;
-        black_color_input_ = new CopyableTextBox(1110, 288, 64, 34, nullptr);
+        black_color_input_ = new CopyableTextBox(1220, 284, 72, 32, nullptr);
         black_color_input_->value("#FFFF00");
 
-        lock_check_ = KCreateCheckBox(692, 340, 104, 28, "锁键鼠");
+        lock_check_ = KCreateCheckBox(812, 330, 94, 28, "锁键鼠");
         lock_check_->value(1);
         lock_check_->color(KThemeManager::instance().theme().panelBg);
         lock_check_->selection_color(KThemeManager::instance().theme().primary);
-        auto* black = KCreateButton(806, 338, 118, 34, "黑屏10秒", KBUTTON_HEAVY);
+        auto* black = KCreateButton(912, 328, 96, 32, "黑屏10秒", KBUTTON_HEAVY);
         black->callback(BlackThunk, this);
-        auto* black_perm = KCreateButton(934, 338, 116, 34, "永久黑屏", KBUTTON_LIGHT);
+        auto* black_perm = KCreateButton(1016, 328, 96, 32, "永久黑屏", KBUTTON_LIGHT);
         black_perm->callback(BlackPermThunk, this);
-        auto* clear_text = createLabel(692, 382, 492, 24, "黑屏内容独立于聊天；颜色支持 #RRGGBB、0x00BBGGRR 或 黄色/白色/红色/绿色/蓝色。", true);
+        auto* unlock_all = KCreateButton(1120, 328, 92, 32, "全员解锁", KBUTTON_LIGHT);
+        unlock_all->callback(UnlockAllThunk, this);
+
+        auto* delay_label = createLabel(812, 374, 58, 22, "延迟秒", true);
+        (void)delay_label;
+        shutdown_delay_input_ = new CopyableTextBox(870, 366, 62, 32, nullptr);
+        shutdown_delay_input_->value("0");
+        shutdown_text_input_ = new CopyableTextBox(944, 366, 218, 32, nullptr);
+        shutdown_text_input_->value("请保存作业");
+        auto* shutdown = KCreateButton(1174, 366, 74, 32, "关机", KBUTTON_LIGHT);
+        shutdown->callback(ShutdownThunk, this);
+        auto* reboot = KCreateButton(1258, 366, 74, 32, "重启", KBUTTON_LIGHT);
+        reboot->callback(RebootThunk, this);
+        auto* hint = createLabel(812, 404, 560, 18, "延迟=0 使用强制立即；延迟>0 为倒计时提示。黑屏颜色支持 #RRGGBB / 0x00BBGGRR。", true);
+        hint->labelsize(12);
         action_card->end();
 
-        auto* preview_card = KCreateCard(16, 438, 536, 270, nullptr);
+        auto* preview_card = KCreateCard(16, 448, 450, 350, nullptr);
         preview_card->setTitle("屏幕预览");
         preview_card->setSubtitle("收到 LANT 分片后自动重组并显示修正图");
         preview_card->begin();
-        preview_view_ = KCreateImageView(36, 490, 496, 194, "Preview");
+        preview_view_ = KCreateImageView(36, 500, 410, 274, "Preview");
         preview_view_->set_fit_mode(KImageFitMode::Contain);
         preview_view_->set_empty_text("暂无预览图");
         preview_card->end();
 
-        auto* log_card = KCreateCard(568, 438, 636, 270, nullptr);
+        auto* detail_card = KCreateCard(482, 448, 438, 350, nullptr);
+        detail_card->setTitle("学生详情");
+        detail_card->setSubtitle("系统信息、CPU、内存、进程/窗口数量；右键复制");
+        detail_card->begin();
+        info_display_ = new CopyableTextDisplay(502, 500, 398, 274, nullptr);
+        info_display_->set_text("请选择学生，或启动服务等待 LOGI。\n");
+        detail_card->end();
+
+        auto* list_card = KCreateCard(936, 448, 468, 190, nullptr);
+        list_card->setTitle("进程 / 窗口列表");
+        list_card->setSubtitle("点击“进程”或“窗口”请求并切换列表；右键复制行");
+        list_card->begin();
+        list_table_ = new CleanTable(956, 500, 428, 112, nullptr);
+        list_table_->set_size(0, 2);
+        list_table_->set_col_header_label(0, "ID");
+        list_table_->set_col_header_label(1, "名称 / 标题");
+        list_table_->col_width(0, 112);
+        list_table_->col_width(1, 300);
+        list_table_->set_builtin_copy_context_menu_enabled(true);
+        list_card->end();
+
+        auto* log_card = KCreateCard(936, 652, 468, 146, nullptr);
         log_card->setTitle("运行日志");
         log_card->setSubtitle("右键复制；错误会保留在这里，不再直接崩溃");
         log_card->begin();
-        log_display_ = new CopyableTextDisplay(588, 490, 596, 194, nullptr);
+        log_display_ = new CopyableTextDisplay(956, 704, 428, 70, nullptr);
         log_display_->set_text("");
         log_card->end();
 
-        status_bar_ = KCreateStatusBar(16, 720, 1188, 24, "就绪");
-        status_bar_->setRightText("MSBuild x64 · Debug/Release");
+        status_bar_ = KCreateStatusBar(16, 820, 1388, 24, "就绪");
+        status_bar_->setRightText("Visual Studio/MSBuild x64 · Debug/Release");
 
         end();
     }
+
 
     void onStartStop() {
         try {
@@ -408,6 +486,8 @@ private:
                 const std::string preview_path = pathToUtf8(info.fixed_preview);
                 preview_view_->setImagePath(preview_path.c_str());
             }
+            refreshSelectedDetail();
+            refreshListTable();
         }
     }
 
@@ -427,6 +507,23 @@ private:
     void onPreviewAll() {
         service_.requestPreviewAll();
         appendLog("INFO", "已向所有已登录学生请求预览。", {});
+    }
+
+    void onRequestInfo(std::uint32_t report_type) {
+        const auto ip = selectedIpOrWarn();
+        if (ip.empty()) return;
+        if (report_type == 1 || report_type == 2) {
+            selected_list_mode_ = static_cast<int>(report_type);
+            refreshListTable();
+        }
+        service_.requestInfo(ip, report_type);
+        if (report_type == 0) {
+            appendLog("INFO", "已请求学生完整信息：" + ip, ip);
+        } else if (report_type == 1) {
+            appendLog("INFO", "已请求学生进程列表：" + ip, ip);
+        } else {
+            appendLog("INFO", "已请求学生窗口列表：" + ip, ip);
+        }
     }
 
     void onSendChat() {
@@ -464,6 +561,21 @@ private:
         appendLog("INFO", "已向所有已登录学生发送解锁。", {});
     }
 
+    void onShutdown(bool reboot) {
+        const auto ip = selectedIpOrWarn();
+        if (ip.empty()) return;
+        const auto delay = parseUint32Text(shutdown_delay_input_ ? shutdown_delay_input_->value() : "0");
+        if (!delay) {
+            KShowMessage("延迟格式无效", "延迟秒数必须是 0 到 4294967295 之间的整数。");
+            return;
+        }
+        const char* raw_text = shutdown_text_input_ ? shutdown_text_input_->value() : "";
+        const std::string text = raw_text ? raw_text : "";
+        const bool force = *delay == 0;
+        service_.sendShutdown(ip, reboot, *delay, force, text);
+        appendLog("INFO", std::string("已发送") + (reboot ? "重启" : "关机") + "命令：" + ip, ip);
+    }
+
     void pollService() {
         for (const auto& event : service_.drainEvents()) {
             appendLog(event.level, event.message, event.student_ip);
@@ -474,6 +586,8 @@ private:
             }
         }
         refreshStudents();
+        refreshSelectedDetail();
+        refreshListTable();
         if (service_.isRunning()) {
             setServiceUiState(true);
         }
@@ -481,18 +595,24 @@ private:
 
     void refreshStudents() {
         students_ = service_.studentsSnapshot();
-        students_table_->set_size(static_cast<int>(students_.size()), 5);
-        for (int col = 0; col < 5; ++col) {
-            students_table_->col_width(col, col == 0 ? 160 : (col == 4 ? 184 : 110));
+        students_table_->set_size(static_cast<int>(students_.size()), 8);
+        const int widths[8] = { 142, 58, 120, 105, 132, 150, 82, 140 };
+        for (int col = 0; col < 8; ++col) {
+            students_table_->col_width(col, widths[col]);
         }
         for (std::size_t row = 0; row < students_.size(); ++row) {
             const auto& s = students_[row];
+            const auto& si = s.system_info;
             students_table_->set_cell(static_cast<int>(row), 0, s.ip.c_str());
             students_table_->set_cell(static_cast<int>(row), 1, s.logged_in ? "是" : "否");
-            students_table_->set_cell(static_cast<int>(row), 2, s.last_magic.c_str());
-            const auto active = formatTime(s.last_seen);
-            students_table_->set_cell(static_cast<int>(row), 3, active.c_str());
-            students_table_->set_cell(static_cast<int>(row), 4, s.preview_status.c_str());
+            students_table_->set_cell(static_cast<int>(row), 2, si.valid && !si.computer_name.empty() ? si.computer_name.c_str() : "-");
+            students_table_->set_cell(static_cast<int>(row), 3, si.valid && !si.login_user.empty() ? si.login_user.c_str() : "-");
+            students_table_->set_cell(static_cast<int>(row), 4, si.valid && !si.mac.empty() ? si.mac.c_str() : "-");
+            std::string os = si.valid ? trim(si.os_name + " " + si.os_version) : "-";
+            students_table_->set_cell(static_cast<int>(row), 5, os.c_str());
+            students_table_->set_cell(static_cast<int>(row), 6, s.last_magic.c_str());
+            const auto active = formatTime(s.last_seen) + " / " + s.preview_status;
+            students_table_->set_cell(static_cast<int>(row), 7, active.c_str());
             if (s.ip == selected_ip_ && !s.fixed_preview.empty() && std::filesystem::exists(s.fixed_preview)) {
                 const std::string preview_path = pathToUtf8(s.fixed_preview);
                 preview_view_->setImagePath(preview_path.c_str());
@@ -512,11 +632,98 @@ private:
         }
     }
 
+
+    const StudentInfo* selectedStudent() const {
+        if (selected_ip_.empty()) {
+            return nullptr;
+        }
+        auto it = std::find_if(students_.begin(), students_.end(), [this](const StudentInfo& s) { return s.ip == selected_ip_; });
+        return it == students_.end() ? nullptr : &*it;
+    }
+
     void updateSelectedLabel() {
-        std::string text = "选中：" + (selected_ip_.empty() ? std::string("-") : selected_ip_);
+        std::string text = "选中：";
+        if (const StudentInfo* s = selectedStudent()) {
+            text += s->ip;
+            if (s->system_info.valid) {
+                if (!s->system_info.computer_name.empty()) {
+                    text += " · " + s->system_info.computer_name;
+                }
+                if (!s->system_info.login_user.empty()) {
+                    text += " · " + s->system_info.login_user;
+                }
+            }
+        } else {
+            text += "-";
+        }
         selected_text_->copy_label(text.c_str());
         selected_text_->redraw();
     }
+
+    void refreshSelectedDetail() {
+        if (!info_display_) {
+            return;
+        }
+        const StudentInfo* s = selectedStudent();
+        if (!s) {
+            info_display_->set_text("请选择学生。\n启动服务后，学生 LOGI 登录会自动触发信息请求。\n");
+            return;
+        }
+
+        std::ostringstream oss;
+        oss << "IP：" << s->ip << '\n'
+            << "登录：" << (s->logged_in ? "是" : "否") << '\n'
+            << "最后包：" << s->last_magic << "    活跃：" << formatTime(s->last_seen) << '\n'
+            << "预览：" << s->preview_status << '\n';
+
+        if (s->system_info.valid) {
+            const auto& si = s->system_info;
+            oss << "\n[系统信息]\n"
+                << "计算机名：" << si.computer_name << '\n'
+                << "登录用户：" << si.login_user << "    学生ID：" << si.student_id << '\n'
+                << "MAC：" << si.mac << '\n'
+                << "OS：" << trim(si.os_name + " " + si.os_version) << '\n'
+                << "CPU：" << trim(si.cpu_vendor + " " + si.cpu_model) << '\n'
+                << "内存：" << si.memory << '\n';
+        } else {
+            oss << "\n[系统信息] 未获取；点击“信息”按钮手动请求。\n";
+        }
+
+        oss << "\n进程列表：" << s->processes.size() << " 项"
+            << "    窗口列表：" << s->windows.size() << " 项\n";
+        if (!s->fixed_preview.empty()) {
+            oss << "预览文件：" << pathToUtf8(s->fixed_preview) << '\n';
+        }
+        info_display_->set_text(oss.str().c_str());
+    }
+
+    void refreshListTable() {
+        if (!list_table_) {
+            return;
+        }
+        const StudentInfo* s = selectedStudent();
+        if (!s) {
+            list_table_->set_size(0, 2);
+            list_table_->redraw();
+            return;
+        }
+
+        const bool show_windows = selected_list_mode_ == 2;
+        const auto& entries = show_windows ? s->windows : s->processes;
+        list_table_->set_col_header_label(0, show_windows ? "HWND" : "PID");
+        list_table_->set_col_header_label(1, show_windows ? "窗口标题" : "进程名");
+        list_table_->set_size(static_cast<int>(entries.size()), 2);
+        list_table_->col_width(0, 112);
+        list_table_->col_width(1, 300);
+        for (std::size_t row = 0; row < entries.size(); ++row) {
+            const auto& entry = entries[row];
+            const std::string id = show_windows ? hex32(entry.id) : std::to_string(entry.id);
+            list_table_->set_cell(static_cast<int>(row), 0, id.c_str());
+            list_table_->set_cell(static_cast<int>(row), 1, entry.name.c_str());
+        }
+        list_table_->redraw();
+    }
+
 
     void setServiceUiState(bool running) {
         if (running) {
@@ -576,11 +783,16 @@ private:
     CopyableTextBox* chat_input_ = nullptr;
     CopyableTextBox* black_text_input_ = nullptr;
     CopyableTextBox* black_color_input_ = nullptr;
+    CopyableTextBox* shutdown_delay_input_ = nullptr;
+    CopyableTextBox* shutdown_text_input_ = nullptr;
+    CopyableTextDisplay* info_display_ = nullptr;
     CopyableTextDisplay* log_display_ = nullptr;
     KImageView* preview_view_ = nullptr;
+    KTable* list_table_ = nullptr;
     std::vector<StudentInfo> students_;
     std::string selected_ip_;
     std::string log_text_;
+    int selected_list_mode_ = 1;
 };
 
 } // namespace

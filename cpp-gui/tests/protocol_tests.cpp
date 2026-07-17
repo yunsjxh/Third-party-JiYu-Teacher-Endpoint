@@ -81,6 +81,14 @@ void testPackets() {
     expect(readLe32(chat, 20) == 0x800, "chat type");
     expect(readLe32(chat, 28) == 2, "chat wchar count includes nul");
 
+    auto infoReq = buildInfoRequestMessage("192.168.2.139", 2);
+    expect(infoReq.size() == 32, "info request total size");
+    expect(readLe32(infoReq, 0) == kMess, "info request MESS magic");
+    expect(readLe32(infoReq, 8) == 1, "info request recipient count");
+    expect(readLe32(infoReq, 16) == 16, "info request payload len");
+    expect(readLe32(infoReq, 20) == 0x100000, "info request type");
+    expect(readLe32(infoReq, 28) == 2, "info request report type");
+
     auto bs = buildBlackscreenMessage("192.168.2.139", true, 10, "");
     expect(bs.size() == 55, "black no text size");
     expect(readLe32(bs, 16) == 39, "black no text len field");
@@ -97,6 +105,22 @@ void testPackets() {
     expect(unlock.size() == 29, "unlock size");
     expect(readLe32(unlock, 16) == 0x0d, "unlock payload len");
     expect(readLe32(unlock, 24) == 0x90000000, "unlock flag");
+
+    auto shutdown = buildShutdownCommand(false, 0, true, "", 11);
+    expect(shutdown.size() == 72, "shutdown command size without text");
+    expect(readLe32(shutdown, 28) == 0x80000010, "shutdown command code");
+    expect(readLe32(shutdown, 32) == 11, "shutdown command id");
+    expect(readLe32(shutdown, 36) == 28, "shutdown payload len");
+    expect(readLe32(shutdown, 44) == 0x200, "shutdown category");
+    expect(readLe32(shutdown, 52) == 0x10000014, "shutdown force cmd id");
+    expect(readLe32(shutdown, 56) == 0, "shutdown immediate delay");
+
+    auto reboot = buildShutdownCommand(true, 30, false, "A", 12);
+    expect(readLe32(reboot, 32) == 12, "reboot command id");
+    expect(readLe32(reboot, 36) == 32, "reboot payload len includes utf16z + padding");
+    expect(readLe32(reboot, 52) == 0x13, "reboot non-force cmd id");
+    expect(readLe32(reboot, 56) == 30, "reboot delay");
+    expect(reboot[68] == 'A' && reboot[69] == 0 && reboot[70] == 0 && reboot[71] == 0, "reboot text utf16z");
 
     auto anno2 = buildAnnoLong(ip);
     expect(anno2.size() == 72, "ANNO long size");

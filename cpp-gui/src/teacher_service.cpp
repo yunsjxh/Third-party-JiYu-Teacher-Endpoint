@@ -86,6 +86,96 @@ std::string joinWords(const std::vector<std::string>& values, const char* sep) {
     return oss.str();
 }
 
+std::string fixedUtf16LeField(const std::uint8_t* payload, std::size_t payload_len, std::size_t offset, std::size_t max_chars) {
+    if (!payload || offset >= payload_len || max_chars == 0) {
+        return {};
+    }
+    std::size_t bytes = std::min(max_chars * 2, payload_len - offset);
+    if (bytes % 2 != 0) {
+        --bytes;
+    }
+    std::size_t used = 0;
+    while (used + 1 < bytes) {
+        if (payload[offset + used] == 0 && payload[offset + used + 1] == 0) {
+            break;
+        }
+        used += 2;
+    }
+    return protocol::utf16LeToUtf8(payload + offset, used);
+}
+
+std::string formatMac(const std::uint8_t* data, std::size_t size) {
+    if (!data || size < 6) {
+        return {};
+    }
+    std::ostringstream oss;
+    oss << std::uppercase << std::hex << std::setfill('0');
+    for (std::size_t i = 0; i < 6; ++i) {
+        if (i) {
+            oss << '-';
+        }
+        oss << std::setw(2) << static_cast<int>(data[i]);
+    }
+    return oss.str();
+}
+
+StudentSystemInfo parseStudentSystemInfoPayload(const std::uint8_t* payload, std::size_t payload_len) {
+    StudentSystemInfo info;
+    if (!payload || payload_len < 0x5A) {
+        return info;
+    }
+    info.valid = true;
+    info.computer_name = fixedUtf16LeField(payload, payload_len, 0x10, 32);
+    info.student_id = protocol::readLe32(payload + 0x50);
+    info.mac = formatMac(payload + 0x54, payload_len - 0x54);
+    info.login_user = fixedUtf16LeField(payload, payload_len, 0x5A, 32);
+    info.os_name = fixedUtf16LeField(payload, payload_len, 0x9A, 32);
+    info.os_version = fixedUtf16LeField(payload, payload_len, 0xDA, 64);
+    info.cpu_vendor = fixedUtf16LeField(payload, payload_len, 0x21A, 32);
+    info.cpu_model = fixedUtf16LeField(payload, payload_len, 0x25A, 64);
+    info.memory = fixedUtf16LeField(payload, payload_len, 0x2DA, 16);
+    return info;
+}
+
+std::vector<StudentListEntry> parseIdNamePairs(const std::uint8_t* data, std::size_t size) {
+    std::vector<StudentListEntry> entries;
+    if (!data) {
+        return entries;
+    }
+    std::size_t pos = 0;
+    while (pos + 6 <= size) {
+        StudentListEntry entry;
+        entry.id = protocol::readLe32(data + pos);
+        std::size_t p = pos + 4;
+        while (p + 1 < size && !(data[p] == 0 && data[p + 1] == 0)) {
+            p += 2;
+        }
+        if (p > pos + 4) {
+            entry.name = protocol::utf16LeToUtf8(data + pos + 4, p - (pos + 4));
+        }
+        entries.push_back(std::move(entry));
+        if (p + 1 >= size) {
+            break;
+        }
+        pos = p + 2;
+    }
+    return entries;
+}
+
+std::string sampleEntryNames(const std::vector<StudentListEntry>& entries, std::size_t max_count) {
+    std::vector<std::string> names;
+    names.reserve(std::min(max_count, entries.size()));
+    for (const auto& entry : entries) {
+        if (!entry.name.empty()) {
+            names.push_back(entry.name);
+            if (names.size() >= max_count) {
+                break;
+            }
+        }
+    }
+    return joinWords(names, "，");
+}
+
 } // namespace
 
 TeacherService::TeacherService() = default;
@@ -262,6 +352,24 @@ void TeacherService::requestPreviewAll() {
     }
 }
 
+void TeacherService::requestInfo(const std::string& student_ip, std::uint32_t report_type) {
+    if (report_type > 2) {
+        report_type = 0;
+    }
+    boost::asio::post(io_, [this, student_ip, report_type] {
+        sendSessionTo(student_ip, protocol::buildInfoRequestMessage(student_ip, report_type));
+        std::ostringstream oss;
+        oss << "[Info] 请求学生信息 rtype=" << report_type << " -> " << student_ip;
+        pushEvent("INFO", oss.str(), student_ip);
+    });
+}
+
+void TeacherService::requestInfoAll(std::uint32_t report_type) {
+    for (const auto& ip : studentIpsLocked()) {
+        requestInfo(ip, report_type);
+    }
+}
+
 void TeacherService::sendChat(const std::string& student_ip, const std::string& text) {
     boost::asio::post(io_, [this, student_ip, text] {
         sendSessionTo(student_ip, protocol::buildChatMessage(student_ip, text));
@@ -305,6 +413,18 @@ void TeacherService::sendUnlockAll() {
     for (const auto& ip : studentIpsLocked()) {
         sendUnlock(ip);
     }
+}
+
+void TeacherService::sendShutdown(const std::string& student_ip, bool reboot, std::uint32_t delay_seconds, bool force, const std::string& text) {
+    boost::asio::post(io_, [this, student_ip, reboot, delay_seconds, force, text] {
+        sendMainTo(student_ip, protocol::buildShutdownCommand(reboot, delay_seconds, force, text, command_sequence_++));
+        std::ostringstream oss;
+        oss << "[命令] " << (reboot ? "重启" : "关机") << " -> " << student_ip
+            << ", mode=" << (force ? "强制" : "倒计时")
+            << ", delay=" << delay_seconds
+            << ", text=" << text;
+        pushEvent("INFO", oss.str(), student_ip);
+    });
 }
 
 void TeacherService::setDebugLogging(bool enabled) {
@@ -507,13 +627,26 @@ void TeacherService::handleSessionPacket(const std::vector<std::uint8_t>& packet
             sendMainTo(sip, protocol::buildLpntSubtype2());
             sendMainTo(sip, protocol::buildLpntSubtype3());
             sendMainTo(sip, protocol::buildDmoc(localIp()));
-            std::lock_guard<std::mutex> lock(mutex_);
-            auto& info = students_[sip];
-            info.ip = sip;
-            info.logged_in = true;
-            info.preview_status = "idle";
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                auto& info = students_[sip];
+                info.ip = sip;
+                info.logged_in = true;
+                info.preview_status = "idle";
+            }
+
+            auto timer = std::make_shared<boost::asio::steady_timer>(io_);
+            timer->expires_after(std::chrono::milliseconds(200));
+            timer->async_wait([this, sip, timer](boost::system::error_code ec) {
+                if (!ec && isRunning()) {
+                    sendSessionTo(sip, protocol::buildInfoRequestMessage(sip, 0));
+                    pushEvent("INFO", "[Info] 登录后自动请求学生信息 -> " + sip, sip);
+                }
+            });
+            pushEvent("INFO", "[Login] " + sip + " 登录成功", sip);
+        } else {
+            logDebug("[Login] " + sip + " 重复 LOGI 心跳", sip);
         }
-        pushEvent("INFO", "[Login] " + sip + " 登录成功", sip);
     } else if (magic == protocol::kMess) {
         markStudentPacket(sip, "MESS");
         handleMess(packet, remote, "SessionRecv");
@@ -536,24 +669,82 @@ void TeacherService::handleMess(const std::vector<std::uint8_t>& packet, const u
     const std::uint8_t* payload = packet.data() + header_len;
     const std::size_t payload_len = packet.size() - header_len;
     std::string decoded;
-    if (payload_len >= 16 && protocol::readLe32(payload + 4) == 0x800) {
-        decoded = "[聊天] " + protocol::utf16LeToUtf8(payload + 16, payload_len - 16);
-    } else if (payload_len >= 24 && protocol::readLe32(payload + 4) == 0) {
+    if (payload_len >= 16) {
+        const auto msg_type = protocol::readLe32(payload + 4);
+        const auto category = protocol::readLe32(payload + 8);
         const auto subtype = protocol::readLe32(payload + 12);
-        const auto extra = protocol::readLe32(payload + 20);
-        if (subtype == 6) {
-            decoded = "[窗口标题] " + protocol::utf16LeToUtf8(payload + 24, payload_len - 24);
-        } else if (subtype == 7) {
-            decoded = "[WiFi可用网络数量] " + std::to_string(extra == 0xffffffff ? -1 : static_cast<int>(extra));
-        } else if (subtype == 1) {
-            decoded = "[IE/浏览器URL信息] extra=0x";
-            std::ostringstream oss;
-            oss << decoded << std::hex << std::uppercase << extra;
-            decoded = oss.str();
-        } else if (subtype == 0) {
-            decoded = "[窗口标题清空/PID]";
-        } else if (subtype == 3) {
-            decoded = "[系统性能/进程信息]";
+        if (msg_type == 0x800) {
+            decoded = "[聊天] " + protocol::utf16LeToUtf8(payload + 16, payload_len - 16);
+        } else if (msg_type == 0 && category == 0x800000) {
+            if (subtype == 5) {
+                auto parsed = parseStudentSystemInfoPayload(payload, payload_len);
+                if (parsed.valid) {
+                    {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        auto& info = students_[sip];
+                        info.ip = sip;
+                        info.system_info = parsed;
+                        info.last_info_seen = std::chrono::system_clock::now();
+                    }
+                    decoded = "[学生信息] 计算机=" + parsed.computer_name
+                        + " 用户=" + parsed.login_user
+                        + " MAC=" + parsed.mac
+                        + " OS=" + parsed.os_name + " " + parsed.os_version
+                        + " CPU=" + parsed.cpu_vendor + "/" + parsed.cpu_model
+                        + " 内存=" + parsed.memory;
+                } else {
+                    decoded = "[学生信息] type=5 长度不足 payload_len=" + std::to_string(payload_len);
+                }
+            } else if (subtype == 6 || subtype == 7) {
+                if (payload_len >= 20) {
+                    const auto chunk_flag = protocol::readLe32(payload + 16);
+                    auto entries = parseIdNamePairs(payload + 20, payload_len - 20);
+                    std::size_t total = entries.size();
+                    {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        auto& info = students_[sip];
+                        info.ip = sip;
+                        auto& target = subtype == 6 ? info.processes : info.windows;
+                        if (chunk_flag == 1) {
+                            target.clear();
+                        }
+                        target.insert(target.end(), entries.begin(), entries.end());
+                        total = target.size();
+                        info.last_info_seen = std::chrono::system_clock::now();
+                    }
+                    const std::string kind = subtype == 6 ? "进程" : "窗口";
+                    decoded = "[" + kind + "列表" + (chunk_flag == 1 ? "首片" : "续片") + "] 本片 "
+                        + std::to_string(entries.size()) + " 个，累计 " + std::to_string(total) + " 个";
+                    const auto sample = sampleEntryNames(entries, 6);
+                    if (!sample.empty()) {
+                        decoded += "：" + sample;
+                        if (entries.size() > 6) {
+                            decoded += "…";
+                        }
+                    }
+                } else {
+                    decoded = "[信息上报] type=" + std::to_string(subtype) + " 长度不足 payload_len=" + std::to_string(payload_len);
+                }
+            } else {
+                decoded = "[信息上报] 未知 type=" + std::to_string(subtype);
+            }
+        } else if (msg_type == 0 && payload_len >= 24) {
+            const auto extra = protocol::readLe32(payload + 20);
+            if (subtype == 6) {
+                decoded = "[窗口标题] " + protocol::utf16LeToUtf8(payload + 24, payload_len - 24);
+            } else if (subtype == 7) {
+                decoded = "[WiFi可用网络数量] " + std::to_string(extra == 0xffffffff ? -1 : static_cast<int>(extra));
+            } else if (subtype == 1) {
+                std::ostringstream oss;
+                oss << "[IE/浏览器URL信息] extra=0x" << std::hex << std::uppercase << extra;
+                decoded = oss.str();
+            } else if (subtype == 0) {
+                std::ostringstream oss;
+                oss << "[窗口标题清空/PID=0x" << std::hex << std::uppercase << extra << "]";
+                decoded = oss.str();
+            } else if (subtype == 3) {
+                decoded = "[系统性能/进程信息]";
+            }
         }
     }
     if (decoded.empty()) {

@@ -294,6 +294,22 @@ Bytes buildChatMessage(const std::string& student_ip, const std::string& text) {
     return out;
 }
 
+Bytes buildInfoRequestMessage(const std::string& student_ip, std::uint32_t report_type) {
+    Bytes payload;
+    appendLe32(payload, 16);
+    appendLe32(payload, 0x100000);
+    appendLe32(payload, 0);
+    appendLe32(payload, report_type);
+
+    Bytes out;
+    appendLe32(out, kMess);
+    appendLe32(out, 1);
+    appendLe32(out, 1);
+    appendBytes(out, ipv4Bytes(student_ip));
+    appendBytes(out, payload);
+    return out;
+}
+
 Bytes buildComdCommandEx(std::uint32_t cmd_code, const Bytes& payload, const Bytes& guid, const Bytes& extra_header, std::uint32_t command_id) {
     Bytes inner;
     appendLe32(inner, cmd_code);
@@ -322,6 +338,28 @@ Bytes buildComdLock(bool lock, std::uint32_t command_id) {
     appendLe32(payload, 10);
     appendLe32(payload, 0);
     payload.insert(payload.end(), 8, 0);
+    return buildComdCommandEx(0x80000010, payload, bytesFromArray(kTeacherGuidComd, 16), {}, command_id);
+}
+
+Bytes buildShutdownCommand(bool reboot, std::uint32_t delay_seconds, bool force, const std::string& text, std::uint32_t command_id) {
+    std::uint32_t cmd = reboot ? 0x13 : 0x14;
+    if (force) {
+        cmd |= 0x10000000;
+    }
+
+    Bytes payload;
+    appendLe32(payload, 0x200);
+    appendLe32(payload, 0);
+    appendLe32(payload, cmd);
+    appendLe32(payload, delay_seconds);
+    payload.insert(payload.end(), 8, 0);
+    if (!text.empty()) {
+        appendBytes(payload, utf16LeZ(text));
+    }
+    // The student receiver copies from body+0x0C using the packet length and
+    // consumes four bytes past the logical payload; this mirrors the Python
+    // implementation and keeps the optional text terminator intact.
+    payload.insert(payload.end(), 4, 0);
     return buildComdCommandEx(0x80000010, payload, bytesFromArray(kTeacherGuidComd, 16), {}, command_id);
 }
 
