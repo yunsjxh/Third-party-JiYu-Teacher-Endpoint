@@ -5,7 +5,7 @@
 - 主窗口：显示命令提示符 teacher>，用于输入操作命令。
 - 日志窗口：PowerShell 实时 tail teacher_sim.log。
 """
-import socket, struct, threading, time, random, sys, os, uuid, colorsys
+import socket, struct, threading, time, random, sys, os, uuid, colorsys, ipaddress
 import logging, logging.handlers
 from PIL import Image, ImageOps
 import io
@@ -106,7 +106,9 @@ def spawn_log_window():
 logger = setup_logging()
 
 MCAST, PORT = '224.50.50.42', 4705
-SMCAST, SPORT = '225.2.2.1', 5512
+SESSION_MCAST_PREFIX = '225.2'
+SESSION_BASE_PORT = 5000
+SESSION_PORT_STRIDE = 0x200
 TGUID = uuid.UUID('{F96A6D19-5B29-46B9-AB95-8A143ECDDC26}')
 
 oonc_seq = 0
@@ -114,6 +116,7 @@ cmd_seq = 0
 
 MAGIC_NAMES = {
     0x434E4F4F: 'OONC',
+    0x434E414E: 'NANC',
     0x434E4143: 'CANC',
     0x41434157: 'WACA',
     0x53524E54: 'TNRS',
@@ -130,12 +133,13 @@ MAGIC_NAMES = {
 }
 
 # 日常广播类魔数，不必逐条记录 hexdump
-ROUTINE_MAGICS = {0x434E4F4F, 0x434E4143, 0x4F4E4E41}
+ROUTINE_MAGICS = {0x434E4F4F, 0x434E414E, 0x434E4143, 0x4F4E4E41}
 
 students = {}
 previews = {}   # sip -> {'total':int, 'buf':bytearray, 'got':int}
 last_status = {}  # (sip, key) -> 最近一条同类消息内容（重复降为 DEBUG，防止刷屏）
 running = True
+SELECTED_NETWORK = None
 
 
 def hexdump(data, width=16):
@@ -165,36 +169,299 @@ def is_interesting(d, sip):
 
 
 def get_ip():
-    s = socket.socket(2, 2)
+    global SELECTED_NETWORK
+    SELECTED_NETWORK = None
+    override = os.environ.get('TEACHER_IP', '').strip()
+    peer_hint = os.environ.get('TEACHER_PEER_IP', '').strip()
+    network_hint = os.environ.get('TEACHER_NETWORK', '').strip()
+    benchmark_net = ipaddress.ip_network('198.18.0.0/15')
+
+    def usable(value):
+        try:
+            addr = ipaddress.ip_address(value)
+        except ValueError:
+            return False
+        return (addr.version == 4
+                and not addr.is_loopback
+                and not addr.is_link_local
+                and not addr.is_multicast
+                and not addr.is_unspecified
+                and addr not in benchmark_net)
+
+    peer_address = None
+    if peer_hint:
+        try:
+            peer_address = ipaddress.ip_address(peer_hint)
+            if (peer_address.version != 4 or peer_address.is_unspecified
+                    or peer_address.is_multicast):
+                raise ValueError('必须是普通 IPv4 地址')
+        except Exception as e:
+            raise ValueError(f'TEACHER_PEER_IP 不是有效 IPv4 地址：{peer_hint}（{e}）') from e
+
+    wanted_network = None
+    if network_hint:
+        try:
+            wanted_network = ipaddress.ip_network(network_hint, strict=False)
+            if wanted_network.version != 4:
+                raise ValueError('必须是 IPv4 网段')
+        except ValueError as e:
+            raise ValueError(f'TEACHER_NETWORK 不是有效 IPv4 网段：{network_hint}') from e
+
+    if override:
+        if not usable(override):
+            raise ValueError(f'TEACHER_IP 不是可用的 IPv4 地址：{override}')
+        override_address = ipaddress.ip_address(override)
+        if wanted_network and override_address not in wanted_network:
+            raise ValueError(
+                f'TEACHER_IP={override} 不属于 TEACHER_NETWORK={wanted_network}'
+            )
+        SELECTED_NETWORK = wanted_network
+        logger.info('使用 TEACHER_IP 指定地址：%s', override)
+        return override
+
+    # 官方逻辑枚举所有本机 IPv4，并不会按网卡名称排除虚拟接口。这里同样
+    # 保留全部可用地址；可通过 TEACHER_NETWORK 选择所需网段。
+    if os.name == 'nt':
+        ps_script = (
+            "$ErrorActionPreference='Stop'; "
+            "foreach($nic in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) { "
+            "if($nic.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) { continue }; "
+            "$props=$nic.GetIPProperties(); $gateway=$false; "
+            "foreach($gw in $props.GatewayAddresses) { "
+            "if($gw.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) { "
+            "$gateway=$true; break } }; "
+            "foreach($addr in $props.UnicastAddresses) { "
+            "if($addr.Address.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) { continue }; "
+            "\"{0}`t{1}`t{2}`t{3}\" -f "
+            "$addr.Address.IPAddressToString,$nic.Name,$gateway,$addr.PrefixLength } }"
+        )
+        try:
+            completed = subprocess.run(
+                ['powershell', '-NoProfile', '-Command', ps_script],
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=8,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            candidates = []
+            for line in completed.stdout.splitlines():
+                parts = line.strip().split('\t')
+                if len(parts) != 4 or not usable(parts[0]):
+                    continue
+                candidate, alias, has_gateway, prefix_text = parts
+                addr = ipaddress.ip_address(candidate)
+                prefix = int(prefix_text)
+                candidate_network = ipaddress.ip_network(
+                    f'{candidate}/{prefix}', strict=False)
+                if wanted_network and addr not in wanted_network:
+                    continue
+                gateway = has_gateway.lower() == 'true'
+                score = 100 if gateway else 0
+                score += 20 if addr.is_private else 0
+                if peer_address is not None and peer_address in candidate_network:
+                    score += 1000
+                # 在同分情况下保留 PowerShell 的枚举顺序，避免地址字符串排序
+                # 意外改变选择结果。
+                candidates.append((score, candidate, alias, candidate_network, gateway))
+            if candidates:
+                logger.info('可用 IPv4 候选：%s', '; '.join(
+                    f'{candidate}/{network.prefixlen}（{alias}，默认网关={gateway}）'
+                    for score, candidate, alias, network, gateway in candidates))
+                selected_item = max(enumerate(candidates),
+                                    key=lambda item: (item[1][0], -item[0]))[1]
+                _, selected, alias, selected_network, _ = selected_item
+                SELECTED_NETWORK = selected_network
+                if peer_address and peer_address in selected_network:
+                    logger.info('按 TEACHER_PEER_IP=%s 的直连网段选择地址：%s（%s，网段=%s）',
+                                peer_hint, selected, alias, selected_network)
+                else:
+                    logger.info('自动选择局域网地址：%s（%s，网段=%s）',
+                                selected, alias, selected_network)
+                    if peer_address:
+                        logger.warning(
+                            'TEACHER_PEER_IP=%s 不在所选直连网段 %s；组播发现通常不会跨越路由器',
+                            peer_hint, selected_network)
+                return selected
+            if wanted_network:
+                raise RuntimeError(f'没有找到属于 TEACHER_NETWORK={wanted_network} 的本机地址')
+        except Exception as e:
+            if wanted_network:
+                raise
+            logger.warning('枚举 Windows 网卡失败，将使用路由探测：%s', e)
+
+    # UDP connect 只查询本机路由，不会真正向目标发送数据。优先探测
+    # 指定同端，其次探测本程序使用的组播路由；外网地址只作最后尝试。
+    # 这样在只有局域网、没有默认网关时也能正常启动。
+    route_targets = []
+    if peer_hint:
+        route_targets.append((peer_hint, PORT, 'TEACHER_PEER_IP'))
+    route_targets.extend([
+        (MCAST, PORT, '组播'),
+        ('8.8.8.8', 80, '默认路由'),
+    ])
+    route_errors = []
+    for route_target, route_port, route_name in route_targets:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect((route_target, route_port))
+            selected = s.getsockname()[0]
+            if not usable(selected):
+                raise RuntimeError(f'得到不可用地址 {selected}')
+            if wanted_network and ipaddress.ip_address(selected) not in wanted_network:
+                raise RuntimeError(
+                    f'地址 {selected} 不属于 TEACHER_NETWORK={wanted_network}'
+                )
+            SELECTED_NETWORK = wanted_network
+            logger.info('通过%s路由选择地址：%s', route_name, selected)
+            return selected
+        except OSError as e:
+            route_errors.append(f'{route_name} {route_target}: {e}')
+            logger.warning('%s路由探测失败：%s', route_name, e)
+        except RuntimeError as e:
+            route_errors.append(f'{route_name} {route_target}: {e}')
+            logger.warning('%s路由探测忽略：%s', route_name, e)
+        finally:
+            s.close()
+
+    # 极端情况下 Windows 网卡枚举和路由查询都可能失败，再从
+    # 主机名解析结果中选一个可用局域网地址。
+    hostname_candidates = []
     try:
-        s.connect(('8.8.8.8', 80))
-        ip = s.getsockname()[0]
-        logger.info('本机 IP 获取成功：%s', ip)
-        return ip
-    except Exception as e:
-        logger.error('获取本机 IP 失败：%s', e, exc_info=True)
-        raise
-    finally:
-        s.close()
+        for info in socket.getaddrinfo(
+                socket.gethostname(), None, socket.AF_INET, socket.SOCK_DGRAM):
+            candidate = info[4][0]
+            if candidate not in hostname_candidates and usable(candidate):
+                hostname_candidates.append(candidate)
+    except OSError as e:
+        logger.warning('主机名 IPv4 解析失败：%s', e)
+
+    if wanted_network:
+        hostname_candidates = [
+            candidate for candidate in hostname_candidates
+            if ipaddress.ip_address(candidate) in wanted_network
+        ]
+    if hostname_candidates:
+        selected = hostname_candidates[0]
+        SELECTED_NETWORK = wanted_network
+        logger.info('通过主机名解析选择局域网地址：%s（候选=%s）',
+                    selected, ', '.join(hostname_candidates))
+        return selected
+
+    detail = '; '.join(route_errors) or '未找到可用 IPv4 地址'
+    raise RuntimeError(
+        f'无法自动选择本机局域网 IP（{detail}）。'
+        '请设置 TEACHER_IP，例如：'
+        'set TEACHER_IP=192.168.52.132'
+    )
 
 
 ip = get_ip()
+
+
+def get_channel_id():
+    raw = os.environ.get('TEACHER_CHANNEL', '1').strip()
+    try:
+        channel = int(raw, 0)
+    except ValueError as e:
+        raise ValueError(f'TEACHER_CHANNEL 不是有效整数：{raw}') from e
+    if not 1 <= channel <= 32:
+        raise ValueError('TEACHER_CHANNEL 必须在 1 到 32 之间')
+    return channel
+
+
+CHANNEL_ID = get_channel_id()
+
+
+def get_session_endpoint(channel):
+    """按教师端公式计算频道对应的会话组播地址和 UDP 端口。"""
+    return (f'{SESSION_MCAST_PREFIX}.{channel + 1}.1',
+            SESSION_BASE_PORT + channel * SESSION_PORT_STRIDE)
+
+
+SMCAST, SPORT = get_session_endpoint(CHANNEL_ID)
+DIRECT_PEER_IP = os.environ.get('TEACHER_PEER_IP', '').strip() or None
+
+def build_announce_targets(group, port):
+    """同时生成组播、本网段广播和可选定向发现目标。"""
+    targets = []
+
+    def add(host):
+        host_text = str(host)
+        target = (host_text, port)
+        if host_text != ip and target not in targets:
+            targets.append(target)
+
+    add(group)
+
+    # VMware NAT 和仅主机网络都是独立二层网段。组播被虚拟交换
+    # 机过滤时，子网广播仍能到达同一 VMnet 的宿主机或其他虚拟机。
+    if (SELECTED_NETWORK is not None
+            and SELECTED_NETWORK.prefixlen <= 30
+            and ipaddress.ip_address(ip).is_private):
+        add(SELECTED_NETWORK.broadcast_address)
+
+        # VMware 默认把 VMnet 宿主虚拟网卡放在网段第一个可用
+        # 地址。单播补发可覆盖宿主端防火墙放行单播但限制组播/广播的情况。
+        host_candidate = SELECTED_NETWORK.network_address + 1
+        add(host_candidate)
+
+    if DIRECT_PEER_IP:
+        add(DIRECT_PEER_IP)
+    return targets
+
+
+MAIN_ANNOUNCE_TARGETS = build_announce_targets(MCAST, PORT)
+SESSION_ANNOUNCE_TARGETS = build_announce_targets(SMCAST, SPORT)
+
 sock = socket.socket(2, 2)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 sock.bind(('', PORT))
 sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
                 struct.pack('4s4s', socket.inet_aton(MCAST), socket.inet_aton(ip)))
+sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(ip))
 sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 32)
 logger.info('主 socket 就绪：%s:%d', MCAST, PORT)
 
 sock2 = socket.socket(2, 2)
 sock2.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock2.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 sock2.bind(('', SPORT))
 sock2.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
                  struct.pack('4s4s', socket.inet_aton(SMCAST), socket.inet_aton(ip)))
+sock2.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(ip))
+sock2.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 32)
 logger.info('会话 socket 就绪：%s:%d', SMCAST, SPORT)
 
-logger.info('Teacher %s started on %s:%d + %s:%d', ip, MCAST, PORT, SMCAST, SPORT)
+logger.info('Teacher %s channel=%d started on %s:%d + %s:%d',
+            ip, CHANNEL_ID, MCAST, PORT, SMCAST, SPORT)
+logger.info('发现宣告已启用：NANC（普通频道）+ CANC（自动连接）')
+logger.info('主发现目标：%s', ', '.join(
+    f'{host}:{port}' for host, port in MAIN_ANNOUNCE_TARGETS))
+logger.info('会话发现目标：%s', ', '.join(
+    f'{host}:{port}' for host, port in SESSION_ANNOUNCE_TARGETS))
+if SELECTED_NETWORK is None:
+    logger.warning('未获取到所选网卡的子网掩码，未启用自动子网广播；'
+                   '可设置 TEACHER_NETWORK，例如 192.168.52.0/24')
+
+
+def send_to_targets(out_sock, packet, targets, label):
+    """向一组宣告目标发送同一数据包，单个目标失败不影响其他目标。"""
+    failures = []
+    sent = 0
+    for target in targets:
+        try:
+            out_sock.sendto(packet, target)
+            sent += 1
+        except OSError as e:
+            failures.append(f'{target[0]}:{target[1]}（{e}）')
+    if failures:
+        logger.warning('[%s] 部分目标发送失败：%s', label, '; '.join(failures))
+    if not sent:
+        raise OSError(f'{label} 的全部发送目标均失败')
+    return sent
 
 
 def oonc():
@@ -208,19 +475,47 @@ def oonc():
     return pkt
 
 
+def get_teacher_name_field():
+    name = os.environ.get('TEACHER_NAME', '1')[:31] or '1'
+    nw = (name + '\x00').encode('utf-16-le')
+    name_chars = len(nw) // 2 - 1
+    return nw, name_chars
+
+
+def nanc():
+    """构造普通频道选择模式使用的教师宣告。"""
+    nw, name_chars = get_teacher_name_field()
+    af = (name_chars << 17) | CHANNEL_ID
+    body = struct.pack('<I', af) + socket.inet_aton(ip) + nw
+    declared_length = 11 + name_chars * 2
+    body += b'\x00' * (declared_length - len(body))
+    return (struct.pack('<III', 0x434E414E, 0x10000, len(body))
+            + TGUID.bytes_le
+            + body)
+
+
 def canc():
-    n = '1\x00'
-    nw = n.encode('utf-16-le')
-    nc = len(nw) // 2
-    af = (nc << 16) | 1
-    p = struct.pack('<II', 0x434E4143, 0x10000) + struct.pack('<I', 84) + TGUID.bytes_le
-    p += struct.pack('<I', af) + socket.inet_aton(ip) + b'\x01\x00\x00\x00\x01\x00\x00\x00' + nw
-    p += b'\x00' * (84 - len(nw) - 8)
-    return p
+    """构造自动连接模式使用的教师宣告。"""
+    nw, name_chars = get_teacher_name_field()
+    af = (name_chars << 17) | CHANNEL_ID
+    channel_mask = 1 << (CHANNEL_ID - 1)
+    body = (struct.pack('<I', af)
+            + socket.inet_aton(ip)
+            + struct.pack('<II', channel_mask, 1)
+            + nw)
+    if len(body) > 84:
+        raise ValueError('TEACHER_NAME 编码后超过 CANC 负载上限')
+    body += b'\x00' * (84 - len(body))
+    return (struct.pack('<III', 0x434E4143, 0x10000, len(body))
+            + TGUID.bytes_le
+            + body)
 
 
 def waca(sip):
-    return struct.pack('<II', 0x41434157, 0x10000) + struct.pack('<I', 8) + TGUID.bytes_le + socket.inet_aton(ip) + b'\x01\x00\x00\x00'
+    return (struct.pack('<III', 0x41434157, 0x10000, 8)
+            + TGUID.bytes_le
+            + socket.inet_aton(ip)
+            + struct.pack('<I', CHANNEL_ID))
 
 
 def request_preview(sip):
@@ -458,7 +753,7 @@ def build_blackscreen_mess_payload(lock_input=True, timeout=10, text=None, text_
 
     逐字节匹配真实抓包（教师端 sub_54C4E0，MESS type=0x20）。
 
-    抓包验证结构（Line 223, 教师→组播 225.2.2.1:5512）：
+    抓包验证结构（教师到当前频道对应的会话组播端点）：
       [0..3]  = 总长度 (基础 39 字节 + 可选文本)
       [4..7]  = 0x20 (黑屏)
       [8..11] = 0x80000000 (启动标志)
@@ -523,7 +818,7 @@ def _send_comd_lock(sip, lock=True):
 def send_blackscreen(sip, lock_input=True, timeout=10, text=None):
     """向已登录学生发送黑屏安静命令。
 
-    MESS 协议 → 组播 225.2.2.1:5512（黑屏窗口 + bit 0x20 状态）
+    MESS 协议 → 当前频道对应的会话组播端点（黑屏窗口 + bit 0x20 状态）
     COMD 协议 → 学生单播 :4705（锁定键鼠，sub_44A490 case 6）
 
     超时由教师端主动发解锁包实现——先发 flags=0x80000000（锁），
@@ -904,30 +1199,53 @@ def handle_mess(d, sip, sp, via='unknown'):
 
 def broadcast():
     logger.info('[Broadcast] 启动')
+    first_cycle = True
     while running:
         try:
-            sock.sendto(oonc(), (MCAST, PORT))
-            logger.debug('[Broadcast] OONC 已发送')
+            oonc_packet = oonc()
+            count = send_to_targets(sock, oonc_packet,
+                                    MAIN_ANNOUNCE_TARGETS, 'OONC')
+            logger.debug('[Broadcast] OONC 已发送到 %d 个目标', count)
         except Exception as e:
             logger.error('[Broadcast] OONC 失败：%s', e, exc_info=True)
+            oonc_packet = b''
+            count = 0
         time.sleep(0.5)
 
         try:
-            sock.sendto(canc(), (MCAST, PORT))
-            logger.debug('[Broadcast] CANC 已发送')
+            normal_packet = nanc()
+            auto_packet = canc()
+            normal_count = send_to_targets(sock, normal_packet, MAIN_ANNOUNCE_TARGETS,
+                                           'NANC')
+            auto_count = send_to_targets(sock, auto_packet, MAIN_ANNOUNCE_TARGETS,
+                                         'CANC')
+            logger.debug('[Broadcast] NANC/CANC 已发送到 %d/%d 个目标',
+                         normal_count, auto_count)
+            if first_cycle:
+                targets = ', '.join(f'{host}:{port}'
+                                    for host, port in MAIN_ANNOUNCE_TARGETS)
+                logger.info(
+                    '[Broadcast] 首轮发送完成：OONC len=%d sent=%d；'
+                    'NANC len=%d sent=%d；CANC len=%d mask=0x%08X sent=%d；'
+                    'targets=%s',
+                    len(oonc_packet), count, len(normal_packet), normal_count,
+                    len(auto_packet), 1 << (CHANNEL_ID - 1), auto_count, targets)
+                first_cycle = False
         except Exception as e:
-            logger.error('[Broadcast] CANC 失败：%s', e, exc_info=True)
+            logger.error('[Broadcast] NANC/CANC 失败：%s', e, exc_info=True)
         time.sleep(0.5)
     logger.info('[Broadcast] 退出')
 
 
 def session_anno():
     logger.info('[Session] 广播线程启动')
+    first_cycle = True
     while running:
         try:
             pkt1 = struct.pack('<II', 0x4F4E4E41, 1)
-            sock2.sendto(pkt1, (SMCAST, SPORT))
-            logger.debug('[Session] ANNO(type1) 已发送')
+            type1_count = send_to_targets(sock2, pkt1, SESSION_ANNOUNCE_TARGETS,
+                                          'ANNO(type1)')
+            logger.debug('[Session] ANNO(type1) 已发送到 %d 个目标', type1_count)
             time.sleep(0.3)
 
             pkt2 = (struct.pack('<III', 0x4F4E4E41, 1, 1)
@@ -938,13 +1256,45 @@ def session_anno():
                     + struct.pack('<I', 0x0D5AD030)
                     + struct.pack('<I', 1)
                     + b'\x00'*32)
-            sock2.sendto(pkt2, (SMCAST, SPORT))
-            logger.debug('[Session] ANNO(type2) 已发送')
+            type2_count = send_to_targets(sock2, pkt2, SESSION_ANNOUNCE_TARGETS,
+                                          'ANNO(type2)')
+            logger.debug('[Session] ANNO(type2) 已发送到 %d 个目标', type2_count)
+            if first_cycle:
+                targets = ', '.join(f'{host}:{port}'
+                                    for host, port in SESSION_ANNOUNCE_TARGETS)
+                logger.info(
+                    '[Session] 首轮发送完成：ANNO(type1) len=%d sent=%d；'
+                    'ANNO(type2) len=%d sent=%d；targets=%s',
+                    len(pkt1), type1_count, len(pkt2), type2_count, targets)
+                first_cycle = False
             time.sleep(0.7)
         except Exception as e:
             logger.error('[Session] 广播异常：%s', e, exc_info=True)
             break
     logger.info('[Session] 广播线程退出')
+
+
+def build_session_reply(recipient_ip, msg_type):
+    """构造教师端会话回复，目标地址同时写入 MESS 接收者字段。"""
+    if msg_type == 0x1000:
+        payload = struct.pack('<III', 0x0D, 0x1000, 0)
+        payload += b'\x00'
+    elif msg_type == 0x8000:
+        # 默认 TCPMode=0、TcpComPort=4806，与教师端默认配置一致。
+        # 尾部状态值来自已验证样本；总长度严格保持 0x1B。
+        payload = struct.pack('<III', 0x1B, 0x8000, 0)
+        payload += struct.pack('<IH', 0, 4806)
+        payload += b'\x00' * 4
+        payload += struct.pack('<I', 0x270034B0)
+        payload += b'\x00'
+    else:
+        raise ValueError(f'不支持的会话回复类型：0x{msg_type:08X}')
+
+    if len(payload) != struct.unpack_from('<I', payload)[0]:
+        raise AssertionError('会话回复的声明长度与实际长度不一致')
+    return (struct.pack('<III', 0x5353454D, 1, 1)
+            + socket.inet_aton(recipient_ip)
+            + payload)
 
 
 def session_recv():
@@ -974,22 +1324,13 @@ def session_recv():
                     '（周期重复）' if already_logged_in else '')
 
                 # 1) 真实教师端第一条回复：msg_type=0x1000，总长 0x0d
-                mess1 = (struct.pack('<II', 0x5353454D, 1)
-                         + struct.pack('<I', 1)
-                         + socket.inet_aton(sip)
-                         + b'\x0d\x00\x00\x00\x00\x10\x00\x00'
-                         + b'\x00\x00\x00\x00\x00\x00\x00\x00')
+                mess1 = build_session_reply(sip, 0x1000)
                 sock2.sendto(mess1, (sip, SPORT))
                 log('[MESS] type 0x1000 -> %s:%d, len=%d', sip, SPORT, len(mess1))
                 time.sleep(0.05)
 
                 # 2) 真实教师端第二条回复：msg_type=0x8000，总长 0x1b
-                mess2 = (struct.pack('<II', 0x5353454D, 1)
-                         + struct.pack('<I', 1)
-                         + socket.inet_aton(sip)
-                         + b'\x1b\x00\x00\x00\x00\x80\x00\x00'
-                         + b'\x00\x00\x00\x00\x00\x00\x00\x00'
-                         + b'\xc6\x12\x00\x00\x00\x00\xb0\x34\x00\x27\x00')
+                mess2 = build_session_reply(sip, 0x8000)
                 sock2.sendto(mess2, (sip, SPORT))
                 log('[MESS] type 0x8000 -> %s:%d, len=%d', sip, SPORT, len(mess2))
                 time.sleep(0.05)
@@ -1056,7 +1397,7 @@ def main_recv():
 
             mag = struct.unpack('<I', d[:4])[0]
 
-            # 日常广播（OONC/CANC）直接跳过，不记录
+            # 日常广播（OONC/NANC/CANC）直接跳过，不记录
             if mag in ROUTINE_MAGICS:
                 continue
 
