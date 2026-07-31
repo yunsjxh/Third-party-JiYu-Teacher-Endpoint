@@ -25,7 +25,7 @@
       <AdditionalOptions>/utf-8 /permissive- /Zc:char8_t- %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;gdiplus.lib;ole32.lib;uuid.lib;comctl32.lib;gdi32.lib;user32.lib;kernel32.lib;shell32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;gdiplus.lib;ole32.lib;uuid.lib;comctl32.lib;gdi32.lib;user32.lib;kernel32.lib;shell32.lib;mfplat.lib;mf.lib;mfuuid.lib;wmcodecdspuuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <SubSystem>Console</SubSystem>
     </Link>
   </ItemDefinitionGroup>

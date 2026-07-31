@@ -4,9 +4,12 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <objbase.h>
 
 #include <algorithm>
+#include <array>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 
@@ -23,6 +26,11 @@ void appendLe32(Bytes& out, std::uint32_t value) {
     out.push_back(static_cast<std::uint8_t>((value >> 8) & 0xff));
     out.push_back(static_cast<std::uint8_t>((value >> 16) & 0xff));
     out.push_back(static_cast<std::uint8_t>((value >> 24) & 0xff));
+}
+
+void appendLe16(Bytes& out, std::uint16_t value) {
+    out.push_back(static_cast<std::uint8_t>(value & 0xff));
+    out.push_back(static_cast<std::uint8_t>((value >> 8) & 0xff));
 }
 
 void appendRaw(Bytes& out, const std::uint8_t* data, std::size_t size) {
@@ -43,6 +51,18 @@ Bytes utf16LeNoNul(const std::string& utf8_text) {
         out.resize(out.size() - 2);
     }
     return out;
+}
+
+Bytes teacherNameUtf16(const std::string& teacher_name) {
+    std::string name = teacher_name.empty() ? "1" : teacher_name;
+    Bytes encoded = utf16LeZ(name);
+    constexpr std::size_t kMaxBytes = 64;
+    if (encoded.size() > kMaxBytes) {
+        encoded.resize(kMaxBytes);
+        encoded[kMaxBytes - 2] = 0;
+        encoded[kMaxBytes - 1] = 0;
+    }
+    return encoded;
 }
 
 void appendFixedUtf16LeField(Bytes& out, const std::string& text, std::size_t field_bytes, std::size_t max_text_bytes) {
@@ -73,9 +93,20 @@ Bytes withPacketHeader(std::uint32_t magic, std::uint32_t version, std::uint32_t
 
 } // namespace
 
+SessionEndpoint sessionEndpoint(std::uint32_t channel) {
+    if (channel < 1 || channel > 32) {
+        throw std::invalid_argument("channel must be in 1..32");
+    }
+    SessionEndpoint endpoint;
+    endpoint.multicast = std::string(kSessionMulticastPrefix) + "." + std::to_string(channel + 1) + ".1";
+    endpoint.port = static_cast<unsigned short>(kSessionBasePort + channel * kSessionPortStride);
+    return endpoint;
+}
+
 std::string magicName(std::uint32_t magic) {
     switch (magic) {
     case kOonc: return "OONC";
+    case kNanc: return "NANC";
     case kCanc: return "CANC";
     case kWaca: return "WACA";
     case kTnrs: return "TNRS";
@@ -204,23 +235,49 @@ Bytes buildOonc(const std::string& teacher_ip, std::uint32_t sequence) {
     return withPacketHeader(kOonc, 0x10000, 16, kTeacherGuidLe, payload);
 }
 
-Bytes buildCanc(const std::string& teacher_ip) {
-    const Bytes name = Bytes{ 0x31, 0x00, 0x00, 0x00 }; // Python: '1\0'.encode('utf-16-le')
+Bytes buildNanc(const std::string& teacher_ip, std::uint32_t channel, const std::string& teacher_name) {
+    if (channel < 1 || channel > 32) {
+        throw std::invalid_argument("channel must be in 1..32");
+    }
+    const Bytes name = teacherNameUtf16(teacher_name);
+    const auto name_chars = static_cast<std::uint32_t>(name.size() / 2 - 1);
     Bytes payload;
-    const std::uint32_t af = (static_cast<std::uint32_t>(name.size() / 2) << 16) | 1;
-    appendLe32(payload, af);
+    appendLe32(payload, (name_chars << 17) | channel);
     appendBytes(payload, ipv4Bytes(teacher_ip));
-    appendLe32(payload, 1);
+    appendBytes(payload, name);
+    const std::size_t declared = 11 + static_cast<std::size_t>(name_chars) * 2;
+    if (payload.size() < declared) {
+        payload.resize(declared, 0);
+    }
+    return withPacketHeader(kNanc, 0x10000, static_cast<std::uint32_t>(payload.size()), kTeacherGuidLe, payload);
+}
+
+Bytes buildCanc(const std::string& teacher_ip, std::uint32_t channel, const std::string& teacher_name) {
+    if (channel < 1 || channel > 32) {
+        throw std::invalid_argument("channel must be in 1..32");
+    }
+    const Bytes name = teacherNameUtf16(teacher_name);
+    const auto name_chars = static_cast<std::uint32_t>(name.size() / 2 - 1);
+    Bytes payload;
+    appendLe32(payload, (name_chars << 17) | channel);
+    appendBytes(payload, ipv4Bytes(teacher_ip));
+    appendLe32(payload, 1U << (channel - 1));
     appendLe32(payload, 1);
     appendBytes(payload, name);
-    payload.insert(payload.end(), 84 - name.size() - 8, 0);
+    if (payload.size() > 84) {
+        throw std::invalid_argument("teacher name exceeds CANC payload capacity");
+    }
+    payload.resize(84, 0);
     return withPacketHeader(kCanc, 0x10000, 84, kTeacherGuidLe, payload);
 }
 
-Bytes buildWaca(const std::string& teacher_ip) {
+Bytes buildWaca(const std::string& teacher_ip, std::uint32_t channel) {
+    if (channel < 1 || channel > 32) {
+        throw std::invalid_argument("channel must be in 1..32");
+    }
     Bytes payload;
     appendBytes(payload, ipv4Bytes(teacher_ip));
-    appendLe32(payload, 1);
+    appendLe32(payload, channel);
     return withPacketHeader(kWaca, 0x10000, 8, kTeacherGuidLe, payload);
 }
 
@@ -255,46 +312,80 @@ Bytes buildDmoc(const std::string& teacher_ip) {
     return withPacketHeader(kComd, 0x10000, static_cast<std::uint32_t>(dd.size()), kDmocGuid, dd);
 }
 
-Bytes buildLpntSubtype2() {
+Bytes buildLpnt(std::uint32_t policy_version, bool enabled, std::uint32_t width, std::uint32_t height, std::uint32_t refresh_seconds) {
     Bytes payload;
-    appendLe32(payload, 2);
-    appendLe32(payload, 0);
-    appendLe32(payload, 0x50);
-    appendLe32(payload, 0x3c);
-    appendLe32(payload, 5);
+    appendLe32(payload, policy_version);
+    appendLe32(payload, enabled ? 1U : 0U);
+    appendLe32(payload, width);
+    appendLe32(payload, height);
+    appendLe32(payload, refresh_seconds);
     return withPacketHeader(kLpnt, 0x10000, 20, kPreviewGuid, payload);
+}
+
+Bytes buildLpntSubtype2() {
+    return buildLpnt(2, false);
 }
 
 Bytes buildLpntSubtype3() {
+    return buildLpnt(3, true);
+}
+
+Bytes buildSrnt(std::uint32_t frame_sequence, bool complete, const std::optional<std::vector<std::uint16_t>>& missing_parts) {
     Bytes payload;
-    appendLe32(payload, 3);
-    appendLe32(payload, 1);
-    appendLe32(payload, 0x50);
-    appendLe32(payload, 0x3c);
-    appendLe32(payload, 5);
-    return withPacketHeader(kLpnt, 0x10000, 20, kPreviewGuid, payload);
+    appendLe32(payload, frame_sequence);
+    if (!missing_parts) {
+        appendLe32(payload, 0);
+        appendLe32(payload, 0xffffffffU);
+    } else {
+        appendLe32(payload, complete ? 1U : 0U);
+        appendLe32(payload, static_cast<std::uint32_t>(missing_parts->size()));
+        for (const auto part : *missing_parts) {
+            appendLe16(payload, part);
+        }
+    }
+    payload.push_back(0);
+    payload.push_back(0);
+    return withPacketHeader(kSrnt, 0x10000, static_cast<std::uint32_t>(payload.size()), kPreviewGuid, payload);
+}
+
+Bytes buildMessPacket(const std::string& student_ip, const Bytes& payload) {
+    Bytes out;
+    appendLe32(out, kMess);
+    appendLe32(out, 1);
+    appendLe32(out, 1);
+    appendBytes(out, ipv4Bytes(student_ip));
+    appendBytes(out, payload);
+    return out;
+}
+
+Bytes buildSessionReply(const std::string& student_ip, std::uint32_t message_type, std::uint32_t tcp_mode, std::uint16_t tcp_port) {
+    Bytes payload;
+    if (message_type == 0x1000) {
+        appendLe32(payload, 0x0d);
+        appendLe32(payload, 0x1000);
+        appendLe32(payload, 0);
+        payload.push_back(0);
+    } else if (message_type == 0x8000) {
+        appendLe32(payload, 0x1b);
+        appendLe32(payload, 0x8000);
+        appendLe32(payload, 0);
+        appendLe32(payload, tcp_mode);
+        appendLe16(payload, tcp_port);
+        payload.insert(payload.end(), 4, 0);
+        appendLe32(payload, 0x270034b0);
+        payload.push_back(0);
+    } else {
+        throw std::invalid_argument("unsupported session reply type");
+    }
+    return buildMessPacket(student_ip, payload);
 }
 
 Bytes buildLoginMessType1000(const std::string& student_ip) {
-    Bytes out;
-    appendLe32(out, kMess);
-    appendLe32(out, 1);
-    appendLe32(out, 1);
-    appendBytes(out, ipv4Bytes(student_ip));
-    const std::uint8_t payload[] = { 0x0d,0x00,0x00,0x00,0x00,0x10,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00 };
-    appendRaw(out, payload, sizeof(payload));
-    return out;
+    return buildSessionReply(student_ip, 0x1000);
 }
 
-Bytes buildLoginMessType8000(const std::string& student_ip) {
-    Bytes out;
-    appendLe32(out, kMess);
-    appendLe32(out, 1);
-    appendLe32(out, 1);
-    appendBytes(out, ipv4Bytes(student_ip));
-    const std::uint8_t payload[] = { 0x1b,0x00,0x00,0x00,0x00,0x80,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xc6,0x12,0x00,0x00,0x00,0x00,0xb0,0x34,0x00,0x27,0x00 };
-    appendRaw(out, payload, sizeof(payload));
-    return out;
+Bytes buildLoginMessType8000(const std::string& student_ip, std::uint32_t tcp_mode, std::uint16_t tcp_port) {
+    return buildSessionReply(student_ip, 0x8000, tcp_mode, tcp_port);
 }
 
 Bytes buildChatMessage(const std::string& student_ip, const std::string& text) {
@@ -372,14 +463,14 @@ Bytes buildComdCommandEx(std::uint32_t cmd_code, const Bytes& payload, const Byt
     return out;
 }
 
-Bytes buildComdLock(bool lock, std::uint32_t command_id) {
+Bytes buildComdLock(std::uint32_t timeout_seconds, std::uint32_t command_id) {
     Bytes payload;
     appendLe32(payload, 0x200);
     appendLe32(payload, 0);
     appendLe32(payload, 6);
-    appendLe32(payload, lock ? 1 : 0);
-    appendLe32(payload, 0);
-    appendLe32(payload, 10);
+    appendLe32(payload, 1);
+    appendLe32(payload, 1);
+    appendLe32(payload, timeout_seconds);
     appendLe32(payload, 0);
     payload.insert(payload.end(), 8, 0);
     return buildComdCommandEx(0x80000010, payload, bytesFromArray(kTeacherGuidComd, 16), {}, command_id);
@@ -500,6 +591,124 @@ Bytes buildAnnoLong(const std::string& teacher_ip) {
     appendLe32(out, 1);
     out.insert(out.end(), 32, 0);
     return out;
+}
+
+Bytes buildRemoteViewPayload(const std::string& teacher_ip, const std::string& student_ip, std::uint16_t local_session_port, std::uint16_t peer_session_port, std::uint32_t tcp_mode) {
+    Bytes params(604, 0);
+    const auto teacher = ipv4Bytes(teacher_ip);
+    const auto student = ipv4Bytes(student_ip);
+    std::copy(teacher.begin(), teacher.end(), params.begin() + 4);
+    params[8] = static_cast<std::uint8_t>(local_session_port & 0xff);
+    params[9] = static_cast<std::uint8_t>((local_session_port >> 8) & 0xff);
+    std::copy(teacher.begin(), teacher.end(), params.begin() + 10);
+    params[14] = static_cast<std::uint8_t>(peer_session_port & 0xff);
+    params[15] = static_cast<std::uint8_t>((peer_session_port >> 8) & 0xff);
+    const std::array<std::uint32_t, 8> settings{ 1, 1, 20480, 1, 1440, 25, 75, tcp_mode };
+    for (std::size_t i = 0; i < settings.size(); ++i) {
+        const auto value = settings[i];
+        const auto at = 36 + i * 4;
+        params[at + 0] = static_cast<std::uint8_t>(value & 0xff);
+        params[at + 1] = static_cast<std::uint8_t>((value >> 8) & 0xff);
+        params[at + 2] = static_cast<std::uint8_t>((value >> 16) & 0xff);
+        params[at + 3] = static_cast<std::uint8_t>((value >> 24) & 0xff);
+    }
+    std::copy(student.begin(), student.end(), params.begin() + 68);
+    const std::array<std::uint32_t, 3> tail{ 5, 12, 16 };
+    for (std::size_t i = 0; i < tail.size(); ++i) {
+        const auto value = tail[i];
+        const auto at = 72 + i * 4;
+        params[at + 0] = static_cast<std::uint8_t>(value & 0xff);
+        params[at + 1] = static_cast<std::uint8_t>((value >> 8) & 0xff);
+        params[at + 2] = static_cast<std::uint8_t>((value >> 16) & 0xff);
+        params[at + 3] = static_cast<std::uint8_t>((value >> 24) & 0xff);
+    }
+    Bytes payload;
+    appendLe32(payload, 617);
+    appendLe32(payload, 8);
+    appendLe32(payload, 0x80000000U);
+    appendBytes(payload, params);
+    payload.push_back(0);
+    return payload;
+}
+
+Bytes buildRemoteViewStopPayload() {
+    Bytes payload;
+    appendLe32(payload, 13);
+    appendLe32(payload, 0);
+    appendLe32(payload, 0);
+    payload.push_back(0);
+    return payload;
+}
+
+Bytes buildCommandTransaction(const Bytes& payload, const std::string& teacher_ip) {
+    if (payload.size() > 0x800) {
+        throw std::invalid_argument("command transaction payload exceeds 2048 bytes");
+    }
+    GUID guid{};
+    if (FAILED(CoCreateGuid(&guid))) {
+        throw std::runtime_error("CoCreateGuid failed");
+    }
+    Bytes out;
+    appendLe32(out, kComd);
+    appendLe32(out, 0x10000);
+    appendLe32(out, static_cast<std::uint32_t>(payload.size() + 13));
+    appendRaw(out, reinterpret_cast<const std::uint8_t*>(&guid), sizeof(guid));
+    appendLe32(out, 20000);
+    appendBytes(out, ipv4Bytes(teacher_ip));
+    appendLe32(out, static_cast<std::uint32_t>(payload.size()));
+    appendBytes(out, payload);
+    out.push_back(0);
+    return out;
+}
+
+Bytes buildRemoteControlPayload(const std::string& student_ip, std::uint32_t mode, std::uint16_t port) {
+    Bytes payload(53, 0);
+    const auto put32 = [&](std::size_t at, std::uint32_t value) {
+        payload[at + 0] = static_cast<std::uint8_t>(value & 0xff);
+        payload[at + 1] = static_cast<std::uint8_t>((value >> 8) & 0xff);
+        payload[at + 2] = static_cast<std::uint8_t>((value >> 16) & 0xff);
+        payload[at + 3] = static_cast<std::uint8_t>((value >> 24) & 0xff);
+    };
+    put32(0, 53);
+    put32(4, 8);
+    put32(8, 0);
+    payload[12] = 'M'; payload[13] = 'C'; payload[14] = 'M'; payload[15] = 'D';
+    put32(16, mode);
+    const auto student = ipv4Bytes(student_ip);
+    std::copy(student.begin(), student.end(), payload.begin() + 20);
+    payload[24] = static_cast<std::uint8_t>(port & 0xff);
+    payload[25] = static_cast<std::uint8_t>((port >> 8) & 0xff);
+    return payload;
+}
+
+Bytes buildRemoteInputPacket(std::uint32_t kind, const Bytes& payload) {
+    if (payload.size() != 20) {
+        throw std::invalid_argument("remote input payload must be 20 bytes");
+    }
+    Bytes packet;
+    appendLe32(packet, 0x2321347c);
+    appendLe32(packet, kind);
+    appendBytes(packet, payload);
+    return packet;
+}
+
+Bytes buildRemoteMousePacket(std::uint32_t message, std::uint32_t x, std::uint32_t y, std::uint32_t data, std::uint32_t swapped) {
+    Bytes payload;
+    appendLe32(payload, message);
+    appendLe32(payload, x);
+    appendLe32(payload, y);
+    appendLe32(payload, data);
+    appendLe32(payload, swapped);
+    return buildRemoteInputPacket(1, payload);
+}
+
+Bytes buildRemoteKeyPacket(std::uint16_t scan_code, std::uint16_t virtual_key, bool key_up, bool extended) {
+    Bytes payload;
+    appendLe16(payload, scan_code);
+    appendLe16(payload, virtual_key);
+    appendLe32(payload, (extended ? 1U : 0U) | (key_up ? 0x80U : 0U));
+    payload.resize(20, 0);
+    return buildRemoteInputPacket(16, payload);
 }
 
 } // namespace jiyu::protocol

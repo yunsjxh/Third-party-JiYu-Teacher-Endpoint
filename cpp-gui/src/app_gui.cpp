@@ -1,6 +1,7 @@
 #include "app_gui.hpp"
 
 #include "copyable_widgets.hpp"
+#include "remote_view_window.hpp"
 #include "teacher_service.hpp"
 
 #include "KswordGUI/KswordStyle.h"
@@ -28,6 +29,8 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace jiyu::gui {
@@ -312,6 +315,7 @@ class TeacherWindow : public Fl_Double_Window {
 public:
     TeacherWindow()
         : Fl_Double_Window(kWinW, kWinH, "Third-party JiYu Teacher Endpoint - C++ GUI") {
+        service_options_.preview_dir = desktopPath();
         buildUi();
         refreshStudents();
         appendLog("INFO", "界面已就绪；仅限授权研究与教学演示环境使用。", {});
@@ -320,11 +324,18 @@ public:
 
     ~TeacherWindow() override {
         Fl::remove_timeout(&TeacherWindow::TimerThunk, this);
+        remote_windows_.clear();
         if (list_popup_) {
             list_popup_->hide();
             KThemeManager::instance().UnregisterWindow(list_popup_);
             delete list_popup_;
             list_popup_ = nullptr;
+        }
+        if (settings_popup_) {
+            settings_popup_->hide();
+            KThemeManager::instance().UnregisterWindow(settings_popup_);
+            delete settings_popup_;
+            settings_popup_ = nullptr;
         }
         service_.stop();
     }
@@ -336,12 +347,17 @@ private:
             return;
         }
         self->pollService();
-        Fl::repeat_timeout(0.5, &TeacherWindow::TimerThunk, data);
+        Fl::repeat_timeout(1.0 / 30.0, &TeacherWindow::TimerThunk, data);
     }
 
     static void StartThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onStartStop(); }
     static void ThemeThunk(Fl_Widget*, void*) { KThemeManager::instance().ToggleMode(); }
+    static void SettingsThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->showSettings(); }
+    static void SettingsApplyThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->applySettings(); }
+    static void SettingsCloseThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->hideSettings(); }
     static void PreviewThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onPreviewSelected(); }
+    static void ViewThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onRemoteView(false); }
+    static void ControlThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onRemoteView(true); }
     static void PreviewAllThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onPreviewAll(); }
     static void InfoThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onRequestInfo(0); }
     static void ChatThunk(Fl_Widget*, void* data) { static_cast<TeacherWindow*>(data)->onSendChat(); }
@@ -385,14 +401,16 @@ private:
         student_count_badge_ = KCreateBadge(770, 38, 96, 28, "学生 0");
         student_count_badge_->setAccentColor(KThemeManager::instance().theme().primary);
 
-        status_text_ = createLabel(884, 37, 210, 30, "本机 IP：-", true);
+        status_text_ = createLabel(874, 37, 198, 30, "本机 IP：-", true);
         status_text_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
 
-        start_button_ = KCreateButton(1110, 36, 78, 34, "启动", KBUTTON_HEAVY);
+        start_button_ = KCreateButton(1080, 36, 70, 34, "启动", KBUTTON_HEAVY);
         start_button_->callback(StartThunk, this);
-        auto* theme = KCreateButton(1198, 36, 66, 34, "深/浅", KBUTTON_LIGHT);
+        auto* settings = KCreateButton(1160, 36, 70, 34, "设置", KBUTTON_LIGHT);
+        settings->callback(SettingsThunk, this);
+        auto* theme = KCreateButton(1240, 36, 62, 34, "深/浅", KBUTTON_LIGHT);
         theme->callback(ThemeThunk, this);
-        debug_button_ = KCreateButton(1274, 36, 74, 34, "DEBUG", KBUTTON_LIGHT);
+        debug_button_ = KCreateButton(1312, 36, 62, 34, "DEBUG", KBUTTON_LIGHT);
         debug_button_->callback(DebugThunk, this);
         header->end();
 
@@ -437,6 +455,10 @@ private:
         info->callback(InfoThunk, this);
         auto* unlock = KCreateButton(1096, 202, 70, 32, "解锁", KBUTTON_LIGHT);
         unlock->callback(UnlockThunk, this);
+        auto* view = KCreateButton(1174, 202, 78, 32, "连续观看", KBUTTON_LIGHT);
+        view->callback(ViewThunk, this);
+        auto* control = KCreateButton(1260, 202, 74, 32, "远程控制", KBUTTON_HEAVY);
+        control->callback(ControlThunk, this);
 
         auto* chat_label = createLabel(812, 250, 72, 22, "聊天内容", true);
         (void)chat_label;
@@ -526,6 +548,129 @@ private:
         status_bar_->setRightText("Visual Studio/MSBuild x64 · Debug/Release");
 
         end();
+    }
+
+    void ensureSettingsPopup() {
+        if (settings_popup_) return;
+        settings_popup_ = new Fl_Double_Window(700, 574, "连接与远控设置");
+        SetWindowStyle(settings_popup_);
+        settings_popup_->callback(SettingsCloseThunk, this);
+        settings_popup_->begin();
+        auto* card = KCreateCard(16, 16, 668, 542, nullptr);
+        card->setTitle("连接与远控设置");
+        card->setSubtitle("服务停止时可修改；所有输入框均支持右键复制。留空本机 IP 将自动选择网卡。");
+        card->begin();
+
+        auto field = [&](int x, int y, int w, const char* label, CopyableTextBox*& target) {
+            createLabel(x, y, 94, 28, label, true);
+            target = new CopyableTextBox(x + 98, y, w, 30, nullptr);
+        };
+        field(36, 86, 210, "教师名称", settings_teacher_name_);
+        field(372, 86, 120, "频道 1..32", settings_channel_);
+        field(36, 128, 210, "本机 IPv4", settings_local_ip_);
+        field(372, 128, 210, "定向学生 IP", settings_peer_ip_);
+        field(36, 170, 546, "网段 CIDR", settings_network_);
+        field(36, 212, 92, "TCP 模式", settings_tcp_mode_);
+        field(250, 212, 92, "观看 TCP 端口", settings_tcp_port_);
+        field(464, 212, 92, "本地会话端口", settings_view_local_port_);
+        field(36, 254, 92, "对端会话端口", settings_view_peer_port_);
+        field(250, 254, 92, "远控 UDP 端口", settings_control_port_);
+        field(464, 254, 92, "远控模式 0/2", settings_control_mode_);
+        field(36, 296, 92, "观看延迟 ms", settings_view_delay_);
+        field(250, 296, 92, "失败冷却秒", settings_cooldown_);
+
+        settings_remote_control_ = KCreateCheckBox(464, 298, 112, 28, "启用远控");
+        settings_remote_control_->color(KThemeManager::instance().theme().panelBg);
+        settings_remote_control_->selection_color(KThemeManager::instance().theme().primary);
+        settings_dump_h264_ = KCreateCheckBox(576, 298, 72, 28, "存 H264");
+        settings_dump_h264_->color(KThemeManager::instance().theme().panelBg);
+        settings_dump_h264_->selection_color(KThemeManager::instance().theme().primary);
+
+        auto* explanation = new CopyableTextDisplay(36, 348, 628, 116, nullptr);
+        explanation->set_text(
+            "频道决定会话组播地址和端口：225.2.(频道+1).1 / 5000+频道*512。\n"
+            "远控端口 0 表示随机高位端口；远控模式 0=Share，2=Control Student。\n"
+            "本地/对端会话端口 0 表示使用当前频道端口。H264 保存目录位于桌面 teacher_remote_view。\n"
+            "连续观看会使用 Windows Media Foundation 解码，无需 Python 或外部播放器。\n");
+
+        auto* apply = KCreateButton(472, 486, 92, 34, "应用", KBUTTON_HEAVY);
+        apply->callback(SettingsApplyThunk, this);
+        auto* close = KCreateButton(574, 486, 90, 34, "关闭", KBUTTON_LIGHT);
+        close->callback(SettingsCloseThunk, this);
+        card->end();
+        settings_popup_->end();
+        settings_popup_->resizable(card);
+    }
+
+    void loadSettingsFields() {
+        settings_teacher_name_->value(service_options_.teacher_name.c_str());
+        settings_channel_->value(std::to_string(service_options_.channel).c_str());
+        settings_local_ip_->value(service_options_.local_ip.c_str());
+        settings_peer_ip_->value(service_options_.peer_ip.c_str());
+        settings_network_->value(service_options_.network_cidr.c_str());
+        settings_tcp_mode_->value(std::to_string(service_options_.tcp_mode).c_str());
+        settings_tcp_port_->value(std::to_string(service_options_.tcp_port).c_str());
+        settings_view_local_port_->value(std::to_string(service_options_.view_local_port).c_str());
+        settings_view_peer_port_->value(std::to_string(service_options_.view_peer_port).c_str());
+        settings_control_port_->value(std::to_string(service_options_.control_port).c_str());
+        settings_control_mode_->value(std::to_string(service_options_.control_mode).c_str());
+        settings_view_delay_->value(std::to_string(service_options_.view_start_delay_ms).c_str());
+        settings_cooldown_->value(std::to_string(service_options_.view_failure_cooldown_seconds).c_str());
+        settings_remote_control_->value(service_options_.remote_control_enabled ? 1 : 0);
+        settings_dump_h264_->value(service_options_.dump_remote_h264 ? 1 : 0);
+    }
+
+    void showSettings() {
+        ensureSettingsPopup();
+        loadSettingsFields();
+        settings_popup_->position(x() + (w() - settings_popup_->w()) / 2, y() + (h() - settings_popup_->h()) / 2);
+        settings_popup_->show();
+    }
+
+    void hideSettings() {
+        if (settings_popup_) settings_popup_->hide();
+    }
+
+    void applySettings() {
+        if (service_.isRunning()) {
+            KShowMessage("服务正在运行", "请先停止服务，再修改连接设置。 ");
+            return;
+        }
+        const auto channel = parseUint32Text(settings_channel_->value());
+        const auto tcp_mode = parseUint32Text(settings_tcp_mode_->value());
+        const auto tcp_port = parseUint32Text(settings_tcp_port_->value());
+        const auto view_local = parseUint32Text(settings_view_local_port_->value());
+        const auto view_peer = parseUint32Text(settings_view_peer_port_->value());
+        const auto control_port = parseUint32Text(settings_control_port_->value());
+        const auto control_mode = parseUint32Text(settings_control_mode_->value());
+        const auto view_delay = parseUint32Text(settings_view_delay_->value());
+        const auto cooldown = parseUint32Text(settings_cooldown_->value());
+        if (!channel || *channel < 1 || *channel > 32 || !tcp_mode || *tcp_mode > 1 ||
+            !tcp_port || *tcp_port < 1 || *tcp_port > 65535 ||
+            !view_local || *view_local > 65535 || !view_peer || *view_peer > 65535 ||
+            !control_port || *control_port > 65535 || !control_mode || (*control_mode != 0 && *control_mode != 2) ||
+            !view_delay || *view_delay > 10000 || !cooldown || *cooldown < 5 || *cooldown > 3600) {
+            KShowMessage("设置无效", "请检查频道、端口、模式、观看延迟和失败冷却数值。 ");
+            return;
+        }
+        service_options_.teacher_name = trim(settings_teacher_name_->value() ? settings_teacher_name_->value() : "1");
+        if (service_options_.teacher_name.empty()) service_options_.teacher_name = "1";
+        service_options_.channel = *channel;
+        service_options_.local_ip = trim(settings_local_ip_->value() ? settings_local_ip_->value() : "");
+        service_options_.peer_ip = trim(settings_peer_ip_->value() ? settings_peer_ip_->value() : "");
+        service_options_.network_cidr = trim(settings_network_->value() ? settings_network_->value() : "");
+        service_options_.tcp_mode = *tcp_mode;
+        service_options_.tcp_port = static_cast<std::uint16_t>(*tcp_port);
+        service_options_.view_local_port = static_cast<std::uint16_t>(*view_local);
+        service_options_.view_peer_port = static_cast<std::uint16_t>(*view_peer);
+        service_options_.control_port = static_cast<std::uint16_t>(*control_port);
+        service_options_.control_mode = *control_mode;
+        service_options_.view_start_delay_ms = *view_delay;
+        service_options_.view_failure_cooldown_seconds = *cooldown;
+        service_options_.remote_control_enabled = settings_remote_control_->value() != 0;
+        service_options_.dump_remote_h264 = settings_dump_h264_->value() != 0;
+        appendLog("INFO", "连接设置已更新，将在下次启动服务时生效。", {});
+        hideSettings();
     }
 
     void ensureListPopup() {
@@ -677,10 +822,9 @@ private:
             status_bar_->setText("正在打开 UDP 端口并加入组播...");
             redraw();
 
-            TeacherServiceOptions options;
-            options.preview_dir = desktopPath();
+            service_options_.preview_dir = desktopPath();
             std::string error;
-            if (!service_.start(options, &error)) {
+            if (!service_.start(service_options_, &error)) {
                 setServiceUiState(false);
                 KShowMessage("启动失败", error.c_str());
                 appendLog("ERROR", error, {});
@@ -750,7 +894,9 @@ private:
             "进程信息",
             "窗口列表",
             "刷新完整信息",
-            "请求屏幕预览"
+            "请求屏幕预览",
+            "连续观看",
+            "远程控制"
         };
         const bool has_cell = col >= 0;
         if (has_cell) {
@@ -767,9 +913,13 @@ private:
             onRequestInfo(0);
         } else if (picked == 3) {
             onPreviewSelected();
-        } else if (picked == 4 && has_cell) {
+        } else if (picked == 4) {
+            onRemoteView(false);
+        } else if (picked == 5) {
+            onRemoteView(true);
+        } else if (picked == 6 && has_cell) {
             table->copy_cell_to_clipboard(row, col);
-        } else if ((picked == 4 && !has_cell) || (picked == 5 && has_cell)) {
+        } else if ((picked == 6 && !has_cell) || (picked == 7 && has_cell)) {
             table->copy_row_to_clipboard(row);
         }
     }
@@ -802,6 +952,47 @@ private:
             return list_popup_ip_;
         }
         return selectedIpOrWarn();
+    }
+
+    RemoteViewWindow* ensureRemoteWindow(const std::string& ip) {
+        const auto it = remote_windows_.find(ip);
+        if (it != remote_windows_.end()) return it->second.get();
+        auto window = std::make_unique<RemoteViewWindow>(ip, service_);
+        auto* result = window.get();
+        remote_windows_[ip] = std::move(window);
+        return result;
+    }
+
+    void onRemoteView(bool request_control) {
+        const auto ip = selectedIpOrWarn();
+        if (ip.empty()) return;
+        if (isDemoStudentIp(ip)) {
+            appendLog("INFO", "[演示] 内置学生不启动真实连续观看。", ip);
+            return;
+        }
+        auto* window = ensureRemoteWindow(ip);
+        const auto state = service_.remoteViewState(ip);
+        if (!state.active) {
+            std::string error;
+            if (!service_.startRemoteView(ip, service_options_.tcp_port, &error)) {
+                KShowMessage("无法开始连续观看", error.c_str());
+                appendLog("ERROR", error, ip);
+                return;
+            }
+        }
+        if (request_control) {
+            const auto current = service_.remoteViewState(ip);
+            if (current.connected) {
+                std::string error;
+                if (!service_.startRemoteControl(ip, 0, &error)) {
+                    KShowMessage("无法开始远控", error.c_str());
+                }
+            } else {
+                pending_control_ips_.insert(ip);
+                appendLog("INFO", "屏幕通道连接后将自动启动远控。", ip);
+            }
+        }
+        window->showAndFocus();
     }
 
     void onPreviewSelected() {
@@ -1050,9 +1241,28 @@ private:
                 preview_view_->setImagePath(preview_path.c_str());
             }
         }
-        refreshStudents();
-        refreshSelectedDetail();
-        refreshListTable();
+        for (auto& frame : service_.drainRemoteFrames()) {
+            const auto it = remote_windows_.find(frame.student_ip);
+            if (it != remote_windows_.end()) it->second->updateFrame(std::move(frame));
+        }
+        for (auto& [ip, window] : remote_windows_) {
+            const auto state = service_.remoteViewState(ip);
+            window->refreshState(state);
+            if (pending_control_ips_.contains(ip) && state.connected) {
+                std::string error;
+                if (!service_.startRemoteControl(ip, 0, &error)) {
+                    appendLog("ERROR", "自动启动远控失败：" + error, ip);
+                }
+                pending_control_ips_.erase(ip);
+            } else if (pending_control_ips_.contains(ip) && !state.active) {
+                pending_control_ips_.erase(ip);
+            }
+        }
+        if (++poll_ticks_ % 15 == 0) {
+            refreshStudents();
+            refreshSelectedDetail();
+            refreshListTable();
+        }
         if (service_.isRunning()) {
             setServiceUiState(true);
         }
@@ -1242,7 +1452,8 @@ private:
             status_badge_->setAccentColor(KThemeManager::instance().theme().success);
             std::string status = "本机 IP：" + service_.localIp();
             status_text_->copy_label(status.c_str());
-            status_bar_->setText("服务运行中：正在监听 4705 / 5512 并广播教师端存在性");
+            const std::string session = "服务运行中：主通道 224.50.50.42:4705 · 会话 " + service_.sessionDescription();
+            status_bar_->setText(session.c_str());
         } else {
             start_button_->copy_label("启动");
             status_badge_->setText("未启动");
@@ -1281,6 +1492,7 @@ private:
 
 private:
     TeacherService service_;
+    TeacherServiceOptions service_options_;
     CleanLabel* status_text_ = nullptr;
     CleanLabel* selected_text_ = nullptr;
     KButton* start_button_ = nullptr;
@@ -1293,6 +1505,8 @@ private:
     KTable* students_table_ = nullptr;
     KCheckBox* lock_check_ = nullptr;
     KCheckBox* force_check_ = nullptr;
+    KCheckBox* settings_remote_control_ = nullptr;
+    KCheckBox* settings_dump_h264_ = nullptr;
     CopyableTextBox* chat_input_ = nullptr;
     CopyableTextBox* black_text_input_ = nullptr;
     CopyableTextBox* black_color_input_ = nullptr;
@@ -1302,16 +1516,33 @@ private:
     CopyableTextBox* remote_path_input_ = nullptr;
     CopyableTextBox* remote_args_input_ = nullptr;
     CopyableTextBox* remote_show_input_ = nullptr;
+    CopyableTextBox* settings_teacher_name_ = nullptr;
+    CopyableTextBox* settings_channel_ = nullptr;
+    CopyableTextBox* settings_local_ip_ = nullptr;
+    CopyableTextBox* settings_peer_ip_ = nullptr;
+    CopyableTextBox* settings_network_ = nullptr;
+    CopyableTextBox* settings_tcp_mode_ = nullptr;
+    CopyableTextBox* settings_tcp_port_ = nullptr;
+    CopyableTextBox* settings_view_local_port_ = nullptr;
+    CopyableTextBox* settings_view_peer_port_ = nullptr;
+    CopyableTextBox* settings_control_port_ = nullptr;
+    CopyableTextBox* settings_control_mode_ = nullptr;
+    CopyableTextBox* settings_view_delay_ = nullptr;
+    CopyableTextBox* settings_cooldown_ = nullptr;
     CopyableTextDisplay* info_display_ = nullptr;
     CopyableTextDisplay* log_display_ = nullptr;
     KImageView* preview_view_ = nullptr;
     KTable* list_table_ = nullptr;
     Fl_Double_Window* list_popup_ = nullptr;
+    Fl_Double_Window* settings_popup_ = nullptr;
     CleanLabel* list_popup_student_label_ = nullptr;
     std::vector<StudentInfo> students_;
     std::string selected_ip_;
     std::string list_popup_ip_;
     std::string log_text_;
+    std::unordered_map<std::string, std::unique_ptr<RemoteViewWindow>> remote_windows_;
+    std::unordered_set<std::string> pending_control_ips_;
+    std::uint64_t poll_ticks_ = 0;
     int selected_list_mode_ = kListModeProcesses;
 };
 

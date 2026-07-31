@@ -62,6 +62,8 @@
     <ClCompile Include="src\copyable_widgets.cpp" />
     <ClCompile Include="src\protocol.cpp" />
     <ClCompile Include="src\preview_reassembler.cpp" />
+    <ClCompile Include="src\remote_view.cpp" />
+    <ClCompile Include="src\remote_view_window.cpp" />
     <ClCompile Include="src\image_fix.cpp" />
     <ClCompile Include="src\teacher_service.cpp" />
     <ClCompile Include="$(KswordFrameRoot)\KswordGUI\KswordStyle.cpp" />
@@ -94,6 +96,8 @@
     <ClInclude Include="src\image_fix.hpp" />
     <ClInclude Include="src\preview_reassembler.hpp" />
     <ClInclude Include="src\protocol.hpp" />
+    <ClInclude Include="src\remote_view.hpp" />
+    <ClInclude Include="src\remote_view_window.hpp" />
     <ClInclude Include="src\teacher_service.hpp" />
   </ItemGroup>
   <ItemGroup>

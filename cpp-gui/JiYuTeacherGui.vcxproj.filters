@@ -43,6 +43,12 @@
     <ClCompile Include="src\preview_reassembler.cpp">
       <Filter>Source</Filter>
     </ClCompile>
+    <ClCompile Include="src\remote_view.cpp">
+      <Filter>Source</Filter>
+    </ClCompile>
+    <ClCompile Include="src\remote_view_window.cpp">
+      <Filter>Source</Filter>
+    </ClCompile>
     <ClCompile Include="src\image_fix.cpp">
       <Filter>Source</Filter>
     </ClCompile>
@@ -133,6 +139,12 @@
       <Filter>Headers</Filter>
     </ClInclude>
     <ClInclude Include="src\protocol.hpp">
+      <Filter>Headers</Filter>
+    </ClInclude>
+    <ClInclude Include="src\remote_view.hpp">
+      <Filter>Headers</Filter>
+    </ClInclude>
+    <ClInclude Include="src\remote_view_window.hpp">
       <Filter>Headers</Filter>
     </ClInclude>
     <ClInclude Include="src\teacher_service.hpp">

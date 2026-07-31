@@ -7,12 +7,17 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <iphlpapi.h>
 #include <shlobj.h>
+#include <ws2tcpip.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <fstream>
+#include <future>
 #include <iomanip>
+#include <random>
 #include <sstream>
 #include <system_error>
 
@@ -20,6 +25,93 @@ namespace jiyu {
 namespace {
 
 using udp = boost::asio::ip::udp;
+
+struct Ipv4Network {
+    std::uint32_t address = 0;
+    std::uint32_t network = 0;
+    std::uint32_t broadcast = 0;
+    std::uint8_t prefix = 0;
+
+    bool contains(std::uint32_t candidate) const {
+        const std::uint32_t mask = prefix == 0 ? 0 : (0xffffffffU << (32 - prefix));
+        return (candidate & mask) == network;
+    }
+};
+
+std::optional<std::uint32_t> parseIpv4Host(const std::string& text) {
+    IN_ADDR address{};
+    if (InetPtonA(AF_INET, text.c_str(), &address) != 1) {
+        return std::nullopt;
+    }
+    return ntohl(address.S_un.S_addr);
+}
+
+std::string formatIpv4Host(std::uint32_t value) {
+    IN_ADDR address{};
+    address.S_un.S_addr = htonl(value);
+    char buffer[INET_ADDRSTRLEN]{};
+    return InetNtopA(AF_INET, &address, buffer, sizeof(buffer)) ? std::string(buffer) : std::string{};
+}
+
+bool usableIpv4(std::uint32_t address) {
+    const auto first = static_cast<unsigned>((address >> 24) & 0xff);
+    const auto second = static_cast<unsigned>((address >> 16) & 0xff);
+    if (address == 0 || first == 127 || first >= 224 || (first == 169 && second == 254)) {
+        return false;
+    }
+    return !(first == 198 && (second == 18 || second == 19));
+}
+
+bool privateIpv4(std::uint32_t address) {
+    const auto first = static_cast<unsigned>((address >> 24) & 0xff);
+    const auto second = static_cast<unsigned>((address >> 16) & 0xff);
+    return first == 10 || (first == 172 && second >= 16 && second <= 31) || (first == 192 && second == 168);
+}
+
+std::optional<Ipv4Network> parseNetwork(const std::string& text) {
+    if (text.empty()) {
+        return std::nullopt;
+    }
+    const auto slash = text.find('/');
+    const std::string address_text = text.substr(0, slash);
+    const auto address = parseIpv4Host(address_text);
+    if (!address) {
+        return std::nullopt;
+    }
+    unsigned long prefix = 32;
+    try {
+        if (slash != std::string::npos) {
+            std::size_t parsed = 0;
+            prefix = std::stoul(text.substr(slash + 1), &parsed, 10);
+            if (parsed != text.size() - slash - 1 || prefix > 32) {
+                return std::nullopt;
+            }
+        }
+    } catch (...) {
+        return std::nullopt;
+    }
+    const std::uint32_t mask = prefix == 0 ? 0 : (0xffffffffU << (32 - prefix));
+    Ipv4Network result;
+    result.address = *address;
+    result.prefix = static_cast<std::uint8_t>(prefix);
+    result.network = *address & mask;
+    result.broadcast = result.network | ~mask;
+    return result;
+}
+
+std::string getEnvironmentText(const char* name) {
+    const DWORD size = GetEnvironmentVariableA(name, nullptr, 0);
+    if (size == 0) {
+        return {};
+    }
+    std::string value(size, '\0');
+    const DWORD written = GetEnvironmentVariableA(name, value.data(), size);
+    if (written == 0 || written >= size) {
+        return {};
+    }
+    value.resize(written);
+    return value;
+}
 
 std::string nowPrefix() {
     return {};
@@ -203,6 +295,38 @@ bool TeacherService::start(const TeacherServiceOptions& options, std::string* er
         }
         options_ = options;
     }
+    if (options_.teacher_name.empty()) {
+        options_.teacher_name = "1";
+    }
+    if (options_.local_ip.empty()) {
+        options_.local_ip = getEnvironmentText("TEACHER_IP");
+    }
+    if (options_.peer_ip.empty()) {
+        options_.peer_ip = getEnvironmentText("TEACHER_PEER_IP");
+    }
+    if (options_.network_cidr.empty()) {
+        options_.network_cidr = getEnvironmentText("TEACHER_NETWORK");
+    }
+    if (options_.channel < 1 || options_.channel > 32 || options_.tcp_mode > 1 ||
+        options_.tcp_port == 0 || options_.control_mode > 2 || options_.control_mode == 1 ||
+        options_.view_failure_cooldown_seconds < 5) {
+        if (error_message) {
+            *error_message = "连接设置无效：频道应为 1..32，TCP 模式应为 0/1，远控模式应为 0/2。";
+        }
+        return false;
+    }
+    try {
+        const auto session = protocol::sessionEndpoint(options_.channel);
+        session_multicast_ = session.multicast;
+        session_port_ = session.port;
+    } catch (const std::exception& e) {
+        if (error_message) {
+            *error_message = e.what();
+        }
+        return false;
+    }
+    if (options_.view_local_port == 0) options_.view_local_port = session_port_;
+    if (options_.view_peer_port == 0) options_.view_peer_port = session_port_;
     if (options_.preview_dir.empty()) {
         options_.preview_dir = defaultPreviewDir();
     }
@@ -224,6 +348,25 @@ bool TeacherService::start(const TeacherServiceOptions& options, std::string* er
         return false;
     }
 
+    main_announce_targets_.clear();
+    session_announce_targets_.clear();
+    const auto add_target = [&](std::vector<udp::endpoint>& targets, const std::string& host, unsigned short port) {
+        if (host.empty() || host == local_ip_) return;
+        boost::system::error_code ec;
+        const auto address = boost::asio::ip::make_address_v4(host, ec);
+        if (ec) return;
+        const udp::endpoint endpoint(address, port);
+        if (std::find(targets.begin(), targets.end(), endpoint) == targets.end()) {
+            targets.push_back(endpoint);
+        }
+    };
+    add_target(main_announce_targets_, protocol::kMainMulticast, protocol::kMainPort);
+    add_target(session_announce_targets_, session_multicast_, session_port_);
+    for (const auto& target : { selected_broadcast_ip_, selected_host_candidate_ip_, options_.peer_ip }) {
+        add_target(main_announce_targets_, target, protocol::kMainPort);
+        add_target(session_announce_targets_, target, session_port_);
+    }
+
     try {
         io_.restart();
         work_guard_ = std::make_unique<boost::asio::executor_work_guard<boost::asio::io_context::executor_type>>(boost::asio::make_work_guard(io_));
@@ -239,10 +382,15 @@ bool TeacherService::start(const TeacherServiceOptions& options, std::string* er
             command_sequence_ = 0;
             students_.clear();
             previews_ = PreviewReassembler{};
+            preview_policy_versions_.clear();
+            remote_frames_.clear();
+            remote_view_states_.clear();
+            remote_view_failures_.clear();
             ServiceEvent start_event;
             start_event.time = std::chrono::system_clock::now();
             start_event.level = "INFO";
-            start_event.message = "Teacher " + local_ip_ + " started on 224.50.50.42:4705 + 225.2.2.1:5512";
+            start_event.message = "Teacher " + local_ip_ + " channel=" + std::to_string(options_.channel)
+                + " started on 224.50.50.42:4705 + " + session_multicast_ + ":" + std::to_string(session_port_);
             events_.push_back(std::move(start_event));
         }
 
@@ -275,6 +423,17 @@ bool TeacherService::start(const TeacherServiceOptions& options, std::string* er
 }
 
 void TeacherService::stop() {
+    std::vector<std::string> remote_ips;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (running_) {
+            remote_ips.reserve(remote_views_.size());
+            for (const auto& [ip, _] : remote_views_) remote_ips.push_back(ip);
+        }
+    }
+    for (const auto& ip : remote_ips) {
+        stopRemoteView(ip, true);
+    }
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!running_ && !io_thread_.joinable()) {
@@ -306,6 +465,10 @@ void TeacherService::stop() {
             }
         }
         blackscreen_timers_.clear();
+        for (auto& [_, state] : remote_controls_) {
+            if (state && state->socket) state->socket->close(ignored);
+        }
+        remote_controls_.clear();
         if (work_guard_) {
             work_guard_->reset();
         }
@@ -350,10 +513,37 @@ std::vector<ServiceEvent> TeacherService::drainEvents() {
     return out;
 }
 
+std::vector<RemoteFrame> TeacherService::drainRemoteFrames() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<RemoteFrame> frames;
+    frames.reserve(remote_frames_.size());
+    for (auto& [_, frame] : remote_frames_) {
+        frames.push_back(std::move(frame));
+    }
+    remote_frames_.clear();
+    return frames;
+}
+
+std::string TeacherService::sessionDescription() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return session_multicast_ + ":" + std::to_string(session_port_);
+}
+
 void TeacherService::requestPreview(const std::string& student_ip) {
     boost::asio::post(io_, [this, student_ip] {
-        sendMainTo(student_ip, protocol::buildTnrsRequest());
-        pushEvent("INFO", "[Preview] TNRS -> " + student_ip, student_ip);
+        const std::uint32_t current = preview_policy_versions_.contains(student_ip) ? preview_policy_versions_[student_ip] : 3U;
+        const std::uint32_t stop_version = current + 1;
+        const std::uint32_t start_version = current + 2;
+        preview_policy_versions_[student_ip] = start_version;
+        sendMainTo(student_ip, protocol::buildLpnt(stop_version, false));
+        auto timer = std::make_shared<boost::asio::steady_timer>(io_);
+        timer->expires_after(std::chrono::milliseconds(50));
+        timer->async_wait([this, student_ip, start_version, timer](boost::system::error_code ec) {
+            if (!ec && isRunning()) {
+                sendMainTo(student_ip, protocol::buildLpnt(start_version, true));
+                pushEvent("INFO", "[Preview] LPNT restart -> " + student_ip + ", version=" + std::to_string(start_version), student_ip);
+            }
+        });
     });
 }
 
@@ -392,7 +582,7 @@ void TeacherService::sendBlackscreen(const std::string& student_ip, bool lock_in
     boost::asio::post(io_, [this, student_ip, lock_input, timeout_seconds, text, text_color] {
         sendSessionMulticast(protocol::buildBlackscreenMessage(student_ip, lock_input, timeout_seconds, text, text_color));
         if (lock_input) {
-            sendMainTo(student_ip, protocol::buildComdLock(true, command_sequence_++));
+            sendMainTo(student_ip, protocol::buildComdLock(timeout_seconds, command_sequence_++));
         }
         cancelAutoUnlock(student_ip);
         if (timeout_seconds > 0) {
@@ -475,6 +665,249 @@ void TeacherService::sendRunProgram(const std::string& student_ip, const std::st
     });
 }
 
+bool TeacherService::startRemoteView(const std::string& student_ip, std::uint16_t tcp_port, std::string* error_message) {
+    if (!isRunning() || !hasStudentLocked(student_ip)) {
+        if (error_message) *error_message = "学生未登录或服务尚未启动。";
+        return false;
+    }
+    if (tcp_port == 0) tcp_port = options_.tcp_port;
+
+    std::shared_ptr<RemoteViewSession> previous;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto failure = remote_view_failures_.find(student_ip);
+        if (failure != remote_view_failures_.end()) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - failure->second).count();
+            if (elapsed < options_.view_failure_cooldown_seconds) {
+                if (error_message) {
+                    *error_message = "观看连接仍在失败冷却中，请等待 "
+                        + std::to_string(options_.view_failure_cooldown_seconds - elapsed) + " 秒。";
+                }
+                return false;
+            }
+            remote_view_failures_.erase(failure);
+        }
+        const auto existing = remote_views_.find(student_ip);
+        if (existing != remote_views_.end()) {
+            if (!existing->second->finished()) {
+                if (error_message) *error_message = "该学生已有连续观看会话。";
+                return false;
+            }
+            previous = existing->second;
+            remote_views_.erase(existing);
+        }
+    }
+    if (previous) previous->join();
+
+    RemoteViewOptions view_options;
+    view_options.local_ip = localIp();
+    view_options.student_ip = student_ip;
+    view_options.tcp_port = tcp_port;
+    view_options.start_delay_ms = options_.view_start_delay_ms;
+    view_options.output_dir = options_.preview_dir / "teacher_remote_view";
+    view_options.dump_h264 = options_.dump_remote_h264;
+
+    RemoteViewCallbacks callbacks;
+    callbacks.request_feature_start = [this, student_ip](std::string& error) {
+        return requestRemoteViewFeatureSync(student_ip, true, error);
+    };
+    callbacks.connected = [this, student_ip] {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto& state = remote_view_states_[student_ip];
+            state.active = true;
+            state.connected = true;
+            remote_view_failures_.erase(student_ip);
+        }
+        pushEvent("INFO", "[RemoteView] TCP/UMSP channel 10 已连接", student_ip);
+    };
+    callbacks.frame = [this, student_ip](RemoteFrame frame) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        remote_frames_[student_ip] = std::move(frame);
+        auto& state = remote_view_states_[student_ip];
+        ++state.frame_count;
+    };
+    callbacks.cursor = [this, student_ip](std::uint16_t x, std::uint16_t y) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto& state = remote_view_states_[student_ip];
+        state.has_cursor = true;
+        state.cursor_x = x;
+        state.cursor_y = y;
+    };
+    callbacks.log = [this, student_ip](const std::string& level, const std::string& message) {
+        pushEvent(level, "[RemoteView] " + message, student_ip);
+    };
+    callbacks.closed = [this, student_ip](const std::string& failure) {
+        bool unexpected = !failure.empty();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto& state = remote_view_states_[student_ip];
+            state.active = false;
+            state.connected = false;
+            state.controlling = false;
+            if (unexpected) remote_view_failures_[student_ip] = std::chrono::steady_clock::now();
+        }
+        stopRemoteControl(student_ip, unexpected);
+        if (unexpected) {
+            std::string ignored;
+            requestRemoteViewFeatureSync(student_ip, false, ignored);
+        }
+        pushEvent(unexpected ? "ERROR" : "INFO", unexpected
+            ? "[RemoteView] 会话失败并停止：" + failure
+            : "[RemoteView] 会话已停止", student_ip);
+    };
+
+    auto session = std::make_shared<RemoteViewSession>(std::move(view_options), std::move(callbacks));
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        remote_views_[student_ip] = session;
+        auto& state = remote_view_states_[student_ip];
+        state = RemoteViewState{};
+        state.active = true;
+        state.tcp_port = tcp_port;
+    }
+    session->start();
+    pushEvent("INFO", "[RemoteView] 正在探测并连接 TCP " + student_ip + ":" + std::to_string(tcp_port), student_ip);
+    return true;
+}
+
+void TeacherService::stopRemoteView(const std::string& student_ip, bool notify) {
+    stopRemoteControl(student_ip, notify);
+    if (notify && isRunning()) {
+        std::string ignored;
+        requestRemoteViewFeatureSync(student_ip, false, ignored);
+    }
+    std::shared_ptr<RemoteViewSession> session;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = remote_views_.find(student_ip);
+        if (it != remote_views_.end()) {
+            session = it->second;
+            remote_views_.erase(it);
+        }
+        remote_frames_.erase(student_ip);
+        auto& state = remote_view_states_[student_ip];
+        state.active = false;
+        state.connected = false;
+        state.controlling = false;
+    }
+    if (session) {
+        session->stop();
+        session->join();
+    }
+}
+
+bool TeacherService::startRemoteControl(const std::string& student_ip, std::uint16_t port, std::string* error_message) {
+    if (!options_.remote_control_enabled) {
+        if (error_message) *error_message = "远程控制已在连接设置中禁用。";
+        return false;
+    }
+    std::shared_ptr<RemoteViewSession> view;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = remote_views_.find(student_ip);
+        if (it != remote_views_.end()) view = it->second;
+    }
+    if (!view || !view->connected()) {
+        if (error_message) *error_message = "屏幕 TCP 通道尚未连接，请先启动连续观看。";
+        return false;
+    }
+    if (port == 0) port = options_.control_port;
+    if (port == 0) {
+        std::random_device random;
+        std::uniform_int_distribution<unsigned> ports(49152, 65535);
+        port = static_cast<std::uint16_t>(ports(random));
+    }
+
+    auto state = std::make_shared<RemoteControlState>();
+    state->port = port;
+    state->ready_at = std::chrono::steady_clock::now() + std::chrono::milliseconds(350);
+    state->socket = std::make_shared<udp::socket>(io_);
+    boost::system::error_code ec;
+    state->socket->open(udp::v4(), ec);
+    if (!ec) {
+        state->socket->bind(udp::endpoint(boost::asio::ip::make_address_v4(localIp()), 0), ec);
+    }
+    if (ec) {
+        if (error_message) *error_message = "创建远控输入 socket 失败：" + ec.message();
+        return false;
+    }
+
+    std::shared_ptr<RemoteControlState> old;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto existing = remote_controls_.find(student_ip);
+        if (existing != remote_controls_.end()) old = existing->second;
+        remote_controls_[student_ip] = state;
+        auto& view_state = remote_view_states_[student_ip];
+        view_state.controlling = true;
+        view_state.control_port = port;
+    }
+    if (old && old->socket) old->socket->close(ec);
+    const auto payload = protocol::buildRemoteControlPayload(student_ip, options_.control_mode, port);
+    const auto packet = protocol::buildCommandTransaction(payload, localIp());
+    boost::asio::post(io_, [this, student_ip, packet] { sendMainTo(student_ip, packet); });
+    pushEvent("INFO", "[RemoteControl] MCMD mode=" + std::to_string(options_.control_mode)
+        + "，输入端口=" + std::to_string(port), student_ip);
+    return true;
+}
+
+void TeacherService::stopRemoteControl(const std::string& student_ip, bool notify) {
+    std::shared_ptr<RemoteControlState> state;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = remote_controls_.find(student_ip);
+        if (it != remote_controls_.end()) {
+            state = it->second;
+            remote_controls_.erase(it);
+        }
+        auto& view_state = remote_view_states_[student_ip];
+        view_state.controlling = false;
+        view_state.control_port = 0;
+    }
+    boost::system::error_code ignored;
+    if (state && state->socket) state->socket->close(ignored);
+    if (notify && isRunning()) {
+        const std::uint16_t port = state ? state->port : options_.control_port;
+        const auto payload = protocol::buildRemoteControlPayload(student_ip, 1, port);
+        const auto packet = protocol::buildCommandTransaction(payload, localIp());
+        boost::asio::post(io_, [this, student_ip, packet] { sendMainTo(student_ip, packet); });
+    }
+}
+
+bool TeacherService::sendRemoteMouse(const std::string& student_ip, std::uint32_t message, std::uint32_t x, std::uint32_t y, std::int32_t data) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!remote_controls_.contains(student_ip)) return false;
+    }
+    queueRemoteInput(student_ip, protocol::buildRemoteMousePacket(message, x, y, static_cast<std::uint32_t>(data)));
+    return true;
+}
+
+bool TeacherService::sendRemoteKey(const std::string& student_ip, std::uint16_t virtual_key, bool key_up, std::uint16_t scan_code, bool extended) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!remote_controls_.contains(student_ip)) return false;
+    }
+    if (scan_code == 0) scan_code = static_cast<std::uint16_t>(MapVirtualKeyW(virtual_key, MAPVK_VK_TO_VSC));
+    queueRemoteInput(student_ip, protocol::buildRemoteKeyPacket(scan_code, virtual_key, key_up, extended));
+    return true;
+}
+
+RemoteViewState TeacherService::remoteViewState(const std::string& student_ip) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = remote_view_states_.find(student_ip);
+    if (it == remote_view_states_.end()) return {};
+    RemoteViewState state = it->second;
+    const auto view = remote_views_.find(student_ip);
+    if (view != remote_views_.end()) {
+        state.connected = view->second->connected();
+        state.active = !view->second->finished();
+        state.frame_count = view->second->frameCount();
+    }
+    return state;
+}
+
 void TeacherService::setDebugLogging(bool enabled) {
     std::lock_guard<std::mutex> lock(mutex_);
     debug_logging_ = enabled;
@@ -493,6 +926,8 @@ void TeacherService::resetIoObjects() {
     keepalive_timer_.reset();
     work_guard_.reset();
     blackscreen_timers_.clear();
+    remote_controls_.clear();
+    remote_views_.clear();
 }
 
 bool TeacherService::openSockets(std::string* error_message) {
@@ -510,6 +945,8 @@ bool TeacherService::openSockets(std::string* error_message) {
     if (ec) goto fail;
     main_socket_->set_option(boost::asio::socket_base::reuse_address(true), ec);
     if (ec) goto fail;
+    main_socket_->set_option(boost::asio::socket_base::broadcast(true), ec);
+    if (ec) goto fail;
     main_socket_->bind(udp::endpoint(udp::v4(), protocol::kMainPort), ec);
     if (ec) goto fail;
     main_socket_->set_option(boost::asio::ip::multicast::join_group(boost::asio::ip::make_address_v4(protocol::kMainMulticast), local_address), ec);
@@ -523,9 +960,13 @@ bool TeacherService::openSockets(std::string* error_message) {
     if (ec) goto fail;
     session_socket_->set_option(boost::asio::socket_base::reuse_address(true), ec);
     if (ec) goto fail;
-    session_socket_->bind(udp::endpoint(udp::v4(), protocol::kSessionPort), ec);
+    session_socket_->set_option(boost::asio::socket_base::broadcast(true), ec);
     if (ec) goto fail;
-    session_socket_->set_option(boost::asio::ip::multicast::join_group(boost::asio::ip::make_address_v4(protocol::kSessionMulticast), local_address), ec);
+    session_socket_->bind(udp::endpoint(udp::v4(), session_port_), ec);
+    if (ec) goto fail;
+    session_socket_->set_option(boost::asio::ip::multicast::join_group(boost::asio::ip::make_address_v4(session_multicast_), local_address), ec);
+    if (ec) goto fail;
+    session_socket_->set_option(boost::asio::ip::multicast::hops(32), ec);
     if (ec) goto fail;
     session_socket_->set_option(boost::asio::ip::multicast::outbound_interface(local_address), ec);
     return true;
@@ -538,6 +979,87 @@ fail:
 }
 
 std::string TeacherService::detectLocalIp() {
+    selected_broadcast_ip_.clear();
+    selected_host_candidate_ip_.clear();
+    const auto wanted_network = parseNetwork(options_.network_cidr);
+    if (!options_.network_cidr.empty() && !wanted_network) {
+        throw std::runtime_error("TEACHER_NETWORK/网段不是有效 IPv4 CIDR：" + options_.network_cidr);
+    }
+    const auto peer = options_.peer_ip.empty() ? std::optional<std::uint32_t>{} : parseIpv4Host(options_.peer_ip);
+    if (!options_.peer_ip.empty() && !peer) {
+        throw std::runtime_error("定向学生 IP 不是有效 IPv4 地址：" + options_.peer_ip);
+    }
+    if (!options_.local_ip.empty()) {
+        const auto address = parseIpv4Host(options_.local_ip);
+        if (!address || !usableIpv4(*address)) {
+            throw std::runtime_error("指定的本机 IP 不可用：" + options_.local_ip);
+        }
+        if (wanted_network && !wanted_network->contains(*address)) {
+            throw std::runtime_error("指定的本机 IP 不属于设置的网段");
+        }
+        if (wanted_network && wanted_network->prefix <= 30 && privateIpv4(*address)) {
+            selected_broadcast_ip_ = formatIpv4Host(wanted_network->broadcast);
+            selected_host_candidate_ip_ = formatIpv4Host(wanted_network->network + 1);
+        }
+        return options_.local_ip;
+    }
+
+    ULONG buffer_size = 16 * 1024;
+    std::vector<std::uint8_t> storage(buffer_size);
+    auto* adapters = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(storage.data());
+    ULONG result = GetAdaptersAddresses(AF_INET, GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_SKIP_ANYCAST |
+        GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, nullptr, adapters, &buffer_size);
+    if (result == ERROR_BUFFER_OVERFLOW) {
+        storage.resize(buffer_size);
+        adapters = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(storage.data());
+        result = GetAdaptersAddresses(AF_INET, GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_SKIP_ANYCAST |
+            GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, nullptr, adapters, &buffer_size);
+    }
+
+    struct Candidate {
+        int score = 0;
+        std::string text;
+        Ipv4Network network;
+    };
+    std::vector<Candidate> candidates;
+    if (result == NO_ERROR) {
+        for (auto* adapter = adapters; adapter; adapter = adapter->Next) {
+            if (adapter->OperStatus != IfOperStatusUp) continue;
+            const bool has_gateway = adapter->FirstGatewayAddress != nullptr;
+            for (auto* unicast = adapter->FirstUnicastAddress; unicast; unicast = unicast->Next) {
+                if (!unicast->Address.lpSockaddr || unicast->Address.lpSockaddr->sa_family != AF_INET) continue;
+                const auto* address = reinterpret_cast<const sockaddr_in*>(unicast->Address.lpSockaddr);
+                const std::uint32_t host = ntohl(address->sin_addr.S_un.S_addr);
+                if (!usableIpv4(host)) continue;
+                Ipv4Network network;
+                network.address = host;
+                network.prefix = std::min<std::uint8_t>(unicast->OnLinkPrefixLength, 32);
+                const std::uint32_t mask = network.prefix == 0 ? 0 : (0xffffffffU << (32 - network.prefix));
+                network.network = host & mask;
+                network.broadcast = network.network | ~mask;
+                if (wanted_network && !wanted_network->contains(host)) continue;
+                Candidate candidate;
+                candidate.text = formatIpv4Host(host);
+                candidate.network = network;
+                candidate.score = (has_gateway ? 100 : 0) + (privateIpv4(host) ? 20 : 0);
+                if (peer && network.contains(*peer)) candidate.score += 1000;
+                candidates.push_back(std::move(candidate));
+            }
+        }
+    }
+    if (!candidates.empty()) {
+        const auto selected = std::max_element(candidates.begin(), candidates.end(),
+            [](const Candidate& left, const Candidate& right) { return left.score < right.score; });
+        if (selected->network.prefix <= 30 && privateIpv4(selected->network.address)) {
+            selected_broadcast_ip_ = formatIpv4Host(selected->network.broadcast);
+            selected_host_candidate_ip_ = formatIpv4Host(selected->network.network + 1);
+        }
+        return selected->text;
+    }
+    if (wanted_network) {
+        throw std::runtime_error("没有找到属于指定网段的本机 IPv4 地址");
+    }
+
     boost::asio::io_context ctx;
     udp::socket socket(ctx);
     boost::system::error_code ec;
@@ -545,12 +1067,24 @@ std::string TeacherService::detectLocalIp() {
     if (ec) {
         throw std::runtime_error(ec.message());
     }
-    socket.connect(udp::endpoint(boost::asio::ip::make_address("8.8.8.8", ec), 80), ec);
-    if (!ec) {
-        auto endpoint = socket.local_endpoint(ec);
-        if (!ec && endpoint.address().is_v4() && !endpoint.address().is_loopback()) {
-            return endpoint.address().to_string();
+    const std::array<std::pair<std::string, unsigned short>, 3> route_targets{
+        std::pair<std::string, unsigned short>{ options_.peer_ip, protocol::kMainPort },
+        { protocol::kMainMulticast, protocol::kMainPort },
+        { "8.8.8.8", 80 }
+    };
+    for (const auto& [target, port] : route_targets) {
+        if (target.empty()) continue;
+        socket.connect(udp::endpoint(boost::asio::ip::make_address(target, ec), port), ec);
+        if (!ec) {
+            auto endpoint = socket.local_endpoint(ec);
+            if (!ec && endpoint.address().is_v4()) {
+                const auto value = parseIpv4Host(endpoint.address().to_string());
+                if (value && usableIpv4(*value)) {
+                    return endpoint.address().to_string();
+                }
+            }
         }
+        ec.clear();
     }
 
     char hostname[256] = {};
@@ -560,8 +1094,9 @@ std::string TeacherService::detectLocalIp() {
         if (!ec) {
             for (const auto& result : results) {
                 const auto address = result.endpoint().address();
-                if (address.is_v4() && !address.is_loopback()) {
-                    return address.to_string();
+                if (address.is_v4()) {
+                    const auto value = parseIpv4Host(address.to_string());
+                    if (value && usableIpv4(*value)) return address.to_string();
                 }
             }
         }
@@ -613,7 +1148,7 @@ void TeacherService::handleMainPacket(const std::vector<std::uint8_t>& packet, c
         return;
     }
     const auto magic = protocol::readLe32(packet.data());
-    if (magic == protocol::kOonc || magic == protocol::kCanc || magic == protocol::kAnno) {
+    if (magic == protocol::kOonc || magic == protocol::kNanc || magic == protocol::kCanc || magic == protocol::kAnno) {
         return;
     }
     const std::string name = protocol::magicName(magic);
@@ -626,16 +1161,24 @@ void TeacherService::handleMainPacket(const std::vector<std::uint8_t>& packet, c
 
     switch (magic) {
     case protocol::kKaca:
-        sendMainTo(sip, protocol::buildWaca(localIp()));
+        sendMainTo(sip, protocol::buildWaca(localIp(), options_.channel));
         break;
     case protocol::kTrmc:
-        sendMainTo(sip, protocol::buildLpntSubtype3());
+        sendMainTo(sip, protocol::buildLpnt(3, true));
         sendMainTo(sip, protocol::buildDmoc(localIp()));
         break;
     case protocol::kTrnt:
         break;
     case protocol::kDent:
-        sendMainTo(sip, protocol::buildDentAck());
+        if (packet.size() >= 40) {
+            const auto frame_sequence = protocol::readLe32(packet.data() + 36);
+            const auto ack = previews_.acknowledgement(sip, frame_sequence);
+            if (!ack.known) {
+                sendMainTo(sip, protocol::buildSrnt(frame_sequence, false, std::nullopt));
+            } else {
+                sendMainTo(sip, protocol::buildSrnt(frame_sequence, ack.complete, ack.missing_parts));
+            }
+        }
         break;
     case protocol::kLant: {
         auto done = previews_.accept(sip, packet.data(), packet.size());
@@ -670,7 +1213,7 @@ void TeacherService::handleSessionPacket(const std::vector<std::uint8_t>& packet
         pushEvent("INFO", "[SessionRecv] LOGI from " + sip, sip);
         const bool already_logged = hasStudentLocked(sip);
         sendSessionTo(sip, protocol::buildLoginMessType1000(sip));
-        sendSessionTo(sip, protocol::buildLoginMessType8000(sip));
+        sendSessionTo(sip, protocol::buildLoginMessType8000(sip, options_.tcp_mode, options_.tcp_port));
         if (!already_logged) {
             sendMainTo(sip, protocol::buildLpntSubtype2());
             sendMainTo(sip, protocol::buildLpntSubtype3());
@@ -698,7 +1241,7 @@ void TeacherService::handleSessionPacket(const std::vector<std::uint8_t>& packet
     } else if (magic == protocol::kMess) {
         markStudentPacket(sip, "MESS");
         handleMess(packet, remote, "SessionRecv");
-    } else if (magic != protocol::kOonc && magic != protocol::kCanc && magic != protocol::kAnno) {
+    } else if (magic != protocol::kOonc && magic != protocol::kNanc && magic != protocol::kCanc && magic != protocol::kAnno) {
         markStudentPacket(sip, protocol::magicName(magic));
         pushEvent("WARN", "[SessionRecv] 未认证/非登录包 " + protocol::magicName(magic) + " from " + sip, sip);
     }
@@ -838,9 +1381,10 @@ void TeacherService::scheduleBroadcast(bool send_oonc) {
         broadcast_timer_ = std::make_unique<boost::asio::steady_timer>(io_);
     }
     if (send_oonc) {
-        sendMainMulticast(protocol::buildOonc(localIp(), oonc_sequence_++));
+        sendMainAnnouncement(protocol::buildOonc(localIp(), oonc_sequence_++));
     } else {
-        sendMainMulticast(protocol::buildCanc(localIp()));
+        sendMainAnnouncement(protocol::buildNanc(localIp(), options_.channel, options_.teacher_name));
+        sendMainAnnouncement(protocol::buildCanc(localIp(), options_.channel, options_.teacher_name));
     }
     broadcast_timer_->expires_after(std::chrono::milliseconds(500));
     broadcast_timer_->async_wait([this, send_oonc](boost::system::error_code ec) {
@@ -856,10 +1400,10 @@ void TeacherService::scheduleSessionAnno(bool short_packet) {
         session_timer_ = std::make_unique<boost::asio::steady_timer>(io_);
     }
     if (short_packet) {
-        sendSessionMulticast(protocol::buildAnnoShort());
+        sendSessionAnnouncement(protocol::buildAnnoShort());
         session_timer_->expires_after(std::chrono::milliseconds(300));
     } else {
-        sendSessionMulticast(protocol::buildAnnoLong(localIp()));
+        sendSessionAnnouncement(protocol::buildAnnoLong(localIp()));
         session_timer_->expires_after(std::chrono::milliseconds(700));
     }
     session_timer_->async_wait([this, short_packet](boost::system::error_code ec) {
@@ -877,7 +1421,7 @@ void TeacherService::scheduleKeepAlive() {
     const auto ips = studentIpsLocked();
     for (const auto& ip : ips) {
         if (!previews_.hasActivePreview(ip)) {
-            sendMainTo(ip, protocol::buildLpntSubtype3());
+            sendMainTo(ip, protocol::buildLpnt(3, true));
             sendMainTo(ip, protocol::buildDmoc(localIp()));
             logDebug("[KeepAlive] LPNT subtype3 + DMOC -> " + ip, ip);
         }
@@ -928,7 +1472,7 @@ void TeacherService::sendMainTo(const std::string& ip, const std::vector<std::ui
 void TeacherService::sendSessionTo(const std::string& ip, const std::vector<std::uint8_t>& data) {
     if (!session_socket_) return;
     boost::system::error_code ec;
-    const udp::endpoint endpoint(boost::asio::ip::make_address(ip, ec), protocol::kSessionPort);
+    const udp::endpoint endpoint(boost::asio::ip::make_address(ip, ec), session_port_);
     if (!ec) {
         session_socket_->send_to(boost::asio::buffer(data), endpoint, 0, ec);
     }
@@ -940,14 +1484,42 @@ void TeacherService::sendSessionTo(const std::string& ip, const std::vector<std:
 void TeacherService::sendSessionMulticast(const std::vector<std::uint8_t>& data) {
     if (!session_socket_) return;
     boost::system::error_code ec;
-    const auto address = boost::asio::ip::make_address(protocol::kSessionMulticast, ec);
+    const auto address = boost::asio::ip::make_address(session_multicast_, ec);
     if (!ec) {
-        const udp::endpoint endpoint(address, protocol::kSessionPort);
+        const udp::endpoint endpoint(address, session_port_);
         session_socket_->send_to(boost::asio::buffer(data), endpoint, 0, ec);
     }
     if (ec) {
         pushEvent("ERROR", "send session multicast failed: " + ec.message());
     }
+}
+
+void TeacherService::sendMainAnnouncement(const std::vector<std::uint8_t>& data) {
+    if (!main_socket_) return;
+    std::vector<std::string> failures;
+    std::size_t sent = 0;
+    for (const auto& target : main_announce_targets_) {
+        boost::system::error_code ec;
+        main_socket_->send_to(boost::asio::buffer(data), target, 0, ec);
+        if (ec) failures.push_back(target.address().to_string() + ":" + std::to_string(target.port()) + " " + ec.message());
+        else ++sent;
+    }
+    if (sent == 0 && !failures.empty()) pushEvent("ERROR", "main announcement failed: " + failures.front());
+    else if (!failures.empty()) pushEvent("WARN", "main announcement partially failed: " + failures.front());
+}
+
+void TeacherService::sendSessionAnnouncement(const std::vector<std::uint8_t>& data) {
+    if (!session_socket_) return;
+    std::vector<std::string> failures;
+    std::size_t sent = 0;
+    for (const auto& target : session_announce_targets_) {
+        boost::system::error_code ec;
+        session_socket_->send_to(boost::asio::buffer(data), target, 0, ec);
+        if (ec) failures.push_back(target.address().to_string() + ":" + std::to_string(target.port()) + " " + ec.message());
+        else ++sent;
+    }
+    if (sent == 0 && !failures.empty()) pushEvent("ERROR", "session announcement failed: " + failures.front());
+    else if (!failures.empty()) pushEvent("WARN", "session announcement partially failed: " + failures.front());
 }
 
 void TeacherService::sendMainMulticast(const std::vector<std::uint8_t>& data) {
@@ -963,9 +1535,84 @@ void TeacherService::sendMainMulticast(const std::vector<std::uint8_t>& data) {
     }
 }
 
+bool TeacherService::requestRemoteViewFeatureSync(const std::string& student_ip, bool enabled, std::string& error_message) {
+    if (!isRunning()) {
+        error_message = "teacher service is not running";
+        return false;
+    }
+    auto promise = std::make_shared<std::promise<std::string>>();
+    auto future = promise->get_future();
+    boost::asio::post(io_, [this, student_ip, enabled, promise] {
+        try {
+            const auto payload = enabled
+                ? protocol::buildRemoteViewPayload(localIp(), student_ip, options_.view_local_port, options_.view_peer_port, options_.tcp_mode)
+                : protocol::buildRemoteViewStopPayload();
+            const auto packet = protocol::buildMessPacket(student_ip, payload);
+            if (!session_socket_) {
+                promise->set_value("session socket is closed");
+                return;
+            }
+            boost::system::error_code ec;
+            const auto address = boost::asio::ip::make_address(student_ip, ec);
+            if (!ec) session_socket_->send_to(boost::asio::buffer(packet), udp::endpoint(address, session_port_), 0, ec);
+            promise->set_value(ec ? ec.message() : std::string{});
+        } catch (const std::exception& e) {
+            promise->set_value(e.what());
+        }
+    });
+    if (future.wait_for(std::chrono::seconds(3)) != std::future_status::ready) {
+        error_message = "sending remote-view feature timed out";
+        return false;
+    }
+    error_message = future.get();
+    return error_message.empty();
+}
+
+void TeacherService::queueRemoteInput(const std::string& student_ip, const std::vector<std::uint8_t>& packet) {
+    std::shared_ptr<RemoteControlState> state;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = remote_controls_.find(student_ip);
+        if (it == remote_controls_.end()) return;
+        state = it->second;
+    }
+    boost::asio::post(io_, [this, student_ip, state, packet] {
+        const auto send_packet = [this, student_ip, state, packet] {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                const auto it = remote_controls_.find(student_ip);
+                if (it == remote_controls_.end() || it->second != state) return;
+            }
+            boost::system::error_code ec;
+            const auto address = boost::asio::ip::make_address(student_ip, ec);
+            if (!ec && state->socket && state->socket->is_open()) {
+                state->socket->send_to(boost::asio::buffer(packet), udp::endpoint(address, state->port), 0, ec);
+            }
+            if (ec) {
+                pushEvent("ERROR", "[RemoteControl] input send failed: " + ec.message(), student_ip);
+            } else {
+                ++state->input_count;
+                if (packet.size() >= 8 && (protocol::readLe32(packet, 4) == 16 || state->input_count <= 8 || state->input_count % 100 == 0)) {
+                    logDebug("[RemoteControl] input #" + std::to_string(state->input_count)
+                        + " kind=" + std::to_string(protocol::readLe32(packet, 4)), student_ip);
+                }
+            }
+        };
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= state->ready_at) {
+            send_packet();
+            return;
+        }
+        auto timer = std::make_shared<boost::asio::steady_timer>(io_);
+        timer->expires_at(state->ready_at);
+        timer->async_wait([send_packet, timer](boost::system::error_code ec) {
+            if (!ec) send_packet();
+        });
+    });
+}
+
 void TeacherService::doUnlockOnIo(const std::string& student_ip) {
     sendSessionMulticast(protocol::buildUnlockMessage(student_ip));
-    sendMainTo(student_ip, protocol::buildComdLock(false, command_sequence_++));
 }
 
 void TeacherService::markStudentPacket(const std::string& ip, const std::string& magic) {

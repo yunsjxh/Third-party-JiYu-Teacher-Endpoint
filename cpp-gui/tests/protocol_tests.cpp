@@ -44,10 +44,21 @@ void testPackets() {
     expect(readLe32(oonc, 40) == 7, "OONC seq offset");
 
     auto canc = buildCanc(ip);
-    expect(canc.size() == 120, "CANC total size");
+    expect(canc.size() == 112, "CANC total size");
     expect(readLe32(canc, 8) == 84, "CANC len");
     expect(readLe32(canc, 28) == 0x00020001, "CANC af");
     expect(canc[32] == 192 && canc[35] == 203, "CANC ip offset");
+
+    auto endpoint = sessionEndpoint(10);
+    expect(endpoint.multicast == "225.2.11.1", "channel 10 multicast");
+    expect(endpoint.port == 10120, "channel 10 session port");
+
+    auto nanc = buildNanc(ip, 2, "Teacher");
+    expect(readLe32(nanc, 0) == kNanc, "NANC magic");
+    expect((readLe32(nanc, 28) & 0x1f) == 2, "NANC channel");
+
+    auto canc2 = buildCanc(ip, 2, "Teacher");
+    expect(readLe32(canc2, 36) == 2, "CANC channel mask");
 
     auto waca = buildWaca(ip);
     expect(waca.size() == 36, "WACA total size");
@@ -63,17 +74,32 @@ void testPackets() {
     expect(readLe32(lpnt3, 28) == 3, "LPNT3 subtype");
     expect(readLe32(lpnt3, 32) == 1, "LPNT3 ready");
 
+    auto lpntStop = buildLpnt(9, false);
+    expect(readLe32(lpntStop, 28) == 9, "LPNT policy version");
+    expect(readLe32(lpntStop, 32) == 0, "LPNT disabled");
+
+    auto srnt = buildSrnt(77, false, std::vector<std::uint16_t>{ 1, 3 });
+    expect(readLe32(srnt, 0) == kSrnt, "SRNT magic");
+    expect(readLe32(srnt, 28) == 77, "SRNT frame sequence");
+    expect(readLe32(srnt, 36) == 2, "SRNT missing count");
+    expect(srnt[40] == 1 && srnt[42] == 3, "SRNT missing indexes");
+
+    auto srntAll = buildSrnt(78, false, std::nullopt);
+    expect(readLe32(srntAll, 36) == 0xffffffff, "SRNT retry all marker");
+
     auto dmoc = buildDmoc(ip);
     expect(dmoc.size() == 94, "DMOC total size");
     expect(readLe32(dmoc, 8) == 66, "DMOC len");
     expect(dmoc[32] == 192 && dmoc[35] == 203, "DMOC ip offset");
 
-    auto lock = buildComdLock(true, 9);
+    auto lock = buildComdLock(30, 9);
     expect(lock.size() == 80, "COMD lock size");
     expect(readLe32(lock, 8) == 52, "COMD lock outer len");
     expect(readLe32(lock, 28) == 0x80000010, "COMD lock cmd code");
     expect(readLe32(lock, 44) == 0x200, "COMD lock subcmd");
     expect(readLe32(lock, 56) == 1, "COMD lock flag");
+    expect(readLe32(lock, 60) == 1, "COMD lock disables student timer");
+    expect(readLe32(lock, 64) == 30, "COMD lock timeout");
 
     auto chat = buildChatMessage("192.168.2.139", "A");
     expect(chat.size() == 36, "chat A total size");
@@ -154,6 +180,28 @@ void testPackets() {
 
     auto anno2 = buildAnnoLong(ip);
     expect(anno2.size() == 72, "ANNO long size");
+
+    auto viewPayload = buildRemoteViewPayload(ip, "192.168.2.139", 5512, 5512);
+    expect(viewPayload.size() == 617, "remote view payload size");
+    expect(readLe32(viewPayload, 4) == 8, "remote view feature type");
+    expect(viewPayload[16] == 192 && viewPayload[19] == 203, "remote view teacher endpoint");
+    expect(viewPayload[80] == 192 && viewPayload[83] == 139, "remote view student address");
+
+    auto controlPayload = buildRemoteControlPayload("192.168.2.139", 2, 54321);
+    expect(controlPayload.size() == 53, "MCMD payload size");
+    expect(readLe32(controlPayload, 16) == 2, "MCMD mode");
+    expect(controlPayload[24] == 0x31 && controlPayload[25] == 0xd4, "MCMD port");
+
+    auto mouse = buildRemoteMousePacket(0x0201, 1, 2, 3, 4);
+    expect(mouse.size() == 28, "remote mouse size");
+    expect(readLe32(mouse, 0) == 0x2321347c, "remote input magic");
+    expect(readLe32(mouse, 4) == 1, "remote mouse kind");
+    expect(readLe32(mouse, 8) == 0x0201, "remote mouse message");
+
+    auto key = buildRemoteKeyPacket(0x1e, 0x41, true, true);
+    expect(key.size() == 28, "remote key size");
+    expect(readLe32(key, 4) == 16, "remote key kind");
+    expect(readLe32(key, 12) == 0x81, "remote key flags");
 }
 
 void testPreviewReassembler() {
@@ -171,6 +219,9 @@ void testPreviewReassembler() {
     done = reassembler.accept("10.0.0.2", first.data(), first.size());
     expect(done.has_value(), "complete after first fragment");
     expect(done->jpeg == expected, "reassembled bytes match");
+    expect(done->frame_sequence == 0, "preview frame sequence retained");
+    const auto ack = reassembler.acknowledgement("10.0.0.2", 0);
+    expect(ack.known && ack.complete, "completed preview acknowledgement");
 }
 
 } // namespace
